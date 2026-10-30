@@ -1,0 +1,17 @@
+name: swarmqtt
+
+services:
+  web:
+    build: ./web
+    ports:
+      - "127.0.0.1:${UI_PORT:-8080}:8080"   # localhost only: this UI controls Docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - certs:/certs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  certs:
+    name: swarmqtt-certs       # workers mount this by name

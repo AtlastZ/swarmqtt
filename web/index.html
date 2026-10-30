@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>swarmqtt</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="swarmqtt"%3E %3Cg fill="#6B7280"%3E %3Ccircle cx="4" cy="24" r="1.1" opacity=".25"/%3E %3Ccircle cx="4" cy="40" r="1.1" opacity=".25"/%3E %3Ccircle cx="8" cy="13" r="1.5" opacity=".35"/%3E %3Ccircle cx="14" cy="16.5" r="2" opacity=".55"/%3E %3Ccircle cx="20" cy="20.5" r="2.5" opacity=".8"/%3E %3Ccircle cx="6" cy="32" r="1.7" opacity=".4"/%3E %3Ccircle cx="12.5" cy="32" r="2.2" opacity=".6"/%3E %3Ccircle cx="19" cy="32" r="2.7" opacity=".85"/%3E %3Ccircle cx="8" cy="51" r="1.5" opacity=".35"/%3E %3Ccircle cx="14" cy="47.5" r="2" opacity=".55"/%3E %3Ccircle cx="20" cy="43.5" r="2.5" opacity=".8"/%3E %3C/g%3E %3Cpolygon points="41,15 55.72,23.5 55.72,40.5 41,49 26.28,40.5 26.28,23.5" fill="#F59E0B"/%3E %3Cg fill="none" stroke="#111827" stroke-width="3" stroke-linecap="round"%3E %3Cpath d="M41.66 26.34a8 8 0 0 1 0 11.32"/%3E %3Cpath d="M45.19 22.81a13 13 0 0 1 0 18.38"/%3E %3C/g%3E %3Ccircle cx="36" cy="32" r="3.5" fill="#111827"/%3E %3C/svg%3E">
+<style>
+  /* ds-allow-hardcode: standalone internal tool with no design system; colors are tokens on :root, native <select> kept for accessibility */
+  /* space theme: always dark */
+  :root {
+    color-scheme: dark;
+    --space: #05060d; --nebula-a: rgba(91, 33, 182, .35); --nebula-b: rgba(245, 158, 11, .12); --nebula-c: rgba(14, 116, 144, .25);
+    --star: #fff; --star-dim: rgba(255, 255, 255, .8);
+    --bg: rgba(8, 10, 20, .75); --panel: rgba(17, 20, 34, .78); --text: #e6e8eb; --muted: #a3acb9; --border: rgba(148, 163, 184, .22);
+    --accent: #F59E0B; --accent-text: #111827; --brand: #F59E0B; --ok: #4cc77a; --bad: #ff7b6e; --code: rgba(5, 6, 13, .8);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; color: var(--text); font: 14px/1.5 system-ui, sans-serif; min-height: 100vh;
+    background:
+      radial-gradient(ellipse 60% 45% at 12% 8%, var(--nebula-a), transparent 70%),
+      radial-gradient(ellipse 50% 40% at 92% 85%, var(--nebula-b), transparent 70%),
+      radial-gradient(ellipse 45% 35% at 75% 20%, var(--nebula-c), transparent 70%),
+      var(--space);
+    background-attachment: fixed;
+  }
+  /* starfield: tiled dot layers at co-prime sizes so the repeat is hard to spot */
+  body::before, body::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -1; }
+  body::before {
+    background:
+      radial-gradient(1.5px 1.5px at 23px 41px, var(--star-dim), transparent),
+      radial-gradient(1.5px 1.5px at 97px 13px, var(--star-dim), transparent),
+      radial-gradient(1.5px 1.5px at 151px 119px, var(--star-dim), transparent),
+      radial-gradient(1.5px 1.5px at 61px 167px, var(--star-dim), transparent),
+      radial-gradient(1.5px 1.5px at 187px 71px, var(--star), transparent),
+      radial-gradient(1.5px 1.5px at 127px 83px, var(--star-dim), transparent),
+      radial-gradient(1.5px 1.5px at 7px 109px, var(--star-dim), transparent);
+    background-size: 211px 197px;
+  }
+  body::after {
+    background:
+      radial-gradient(1.5px 1.5px at 41px 233px, var(--star), transparent),
+      radial-gradient(2.5px 2.5px at 293px 59px, var(--star), transparent),
+      radial-gradient(2px 2px at 211px 281px, var(--star), transparent),
+      radial-gradient(1.5px 1.5px at 173px 311px, var(--star-dim), transparent),
+      radial-gradient(1.5px 1.5px at 331px 167px, var(--star-dim), transparent);
+    background-size: 389px 347px;
+    animation: twinkle 6s ease-in-out infinite alternate;
+  }
+  @keyframes twinkle { from { opacity: .35; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { body::after { animation: none; } }
+  fieldset, .card { backdrop-filter: blur(6px); }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 24px; letter-spacing: -0.3px; }
+  .brand .accent { color: var(--brand); }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  fieldset { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 0; min-width: 0; }
+  legend { font-weight: 600; padding: 0 6px; }
+  label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+  label > input, label > select, label > textarea { display: block; width: 100%; margin-top: 4px; }
+  input, select, textarea {
+    font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 9px;
+  }
+  textarea { font: 12px/1.4 ui-monospace, monospace; min-height: 78px; resize: vertical; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; gap: 12px; } .row > * { flex: 1; min-width: 0; }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--text); }
+  .check input { width: auto; margin: 0; }
+  .hint { color: var(--muted); font-size: 12px; margin: -6px 0 12px; }
+  .file { font-size: 12px; margin-top: 4px; }
+  .big { font-size: 22px; font-weight: 600; }
+  input[type=range] { padding: 0; border: 0; background: none; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0; }
+  button {
+    font: inherit; font-weight: 600; border-radius: 6px; padding: 9px 16px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); min-height: 40px;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { font-weight: 500; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .card .k { color: var(--muted); font-size: 12px; } .card .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  pre { background: var(--code); border: 1px solid var(--border); border-radius: 6px; padding: 10px; max-height: 260px; overflow: auto; font-size: 12px; margin: 0; white-space: pre-wrap; word-break: break-all; }
+  .section { margin-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 class="brand"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="36" height="36" aria-hidden="true">
+  <g fill="currentColor">
+    <circle cx="4" cy="24" r="1.1" opacity=".25"/>
+    <circle cx="4" cy="40" r="1.1" opacity=".25"/>
+    <circle cx="8" cy="13" r="1.5" opacity=".35"/>
+    <circle cx="14" cy="16.5" r="2" opacity=".55"/>
+    <circle cx="20" cy="20.5" r="2.5" opacity=".8"/>
+    <circle cx="6" cy="32" r="1.7" opacity=".4"/>
+    <circle cx="12.5" cy="32" r="2.2" opacity=".6"/>
+    <circle cx="19" cy="32" r="2.7" opacity=".85"/>
+    <circle cx="8" cy="51" r="1.5" opacity=".35"/>
+    <circle cx="14" cy="47.5" r="2" opacity=".55"/>
+    <circle cx="20" cy="43.5" r="2.5" opacity=".8"/>
+  </g>
+  <polygon points="41,15 55.72,23.5 55.72,40.5 41,49 26.28,40.5 26.28,23.5" fill="#F59E0B"/>
+  <g fill="none" stroke="#111827" stroke-width="3" stroke-linecap="round">
+    <path d="M41.66 26.34a8 8 0 0 1 0 11.32"/>
+    <path d="M45.19 22.81a13 13 0 0 1 0 18.38"/>
+  </g>
+  <circle cx="36" cy="32" r="3.5" fill="#111827"/>
+</svg><span>swar<span class="accent">mqtt</span></span></h1>
+  <p class="sub">Unleash a swarm of IoT devices on your MQTT / MQTTS broker (powered by emqtt-bench).</p>
+
+  <form id="f" autocomplete="off">
+    <div class="grid">
+      <fieldset>
+        <legend>Broker</legend>
+        <div class="row">
+          <label>Host <input name="host" required placeholder="broker.example.com"></label>
+          <label style="flex:.45">Port <input name="port" type="number" min="1" max="65535" value="8883" required></label>
+        </div>
+        <p class="hint">Broker on this machine: use <code>host.docker.internal</code></p>
+        <div class="row">
+          <label>MQTT version
+            <select name="version"><option value="5">5.0</option><option value="4">3.1.1</option><option value="3">3.1</option></select>
+          </label>
+          <label>Client ID prefix <input name="prefix" value="lt"></label>
+        </div>
+        <div class="row">
+          <label>Username <input name="username"></label>
+          <label>Password <input name="password" type="password"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>TLS / Certificates</legend>
+        <label class="check"><input type="checkbox" name="tls" checked> Use MQTTS (TLS)</label>
+        <div class="row">
+          <label>TLS version
+            <select name="tls_version"><option value="">Auto</option><option>tlsv1.2</option><option>tlsv1.3</option></select>
+          </label>
+          <label class="check" style="margin-top:22px"><input type="checkbox" name="verify" checked> Verify server cert</label>
+        </div>
+        <p class="hint">Verify applies to Test connection only. emqtt-bench does not verify the server certificate during the load test.</p>
+        <label>CA certificate (PEM)
+          <textarea name="ca" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          <input class="file" type="file" data-target="ca" aria-label="Upload CA certificate">
+        </label>
+        <label>Client certificate (PEM, for mutual TLS)
+          <textarea name="cert" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          <input class="file" type="file" data-target="cert" aria-label="Upload client certificate">
+        </label>
+        <label>Client private key (PEM)
+          <textarea name="key" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          <input class="file" type="file" data-target="key" aria-label="Upload client private key">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Load</legend>
+        <label>Concurrent devices
+          <input name="total" type="number" min="1" max="1000000" value="100000" required>
+        </label>
+        <input id="totalRange" type="range" min="1000" max="200000" step="1000" value="100000" aria-label="Concurrent devices slider" style="width:100%">
+        <p class="hint" id="workersHint"></p>
+        <div class="row">
+          <label>Connections / sec (total) <input name="rate" type="number" min="1" value="2000" required></label>
+          <label>Keepalive (s) <input name="keepalive" type="number" min="5" value="60" required></label>
+        </div>
+        <label>Mode
+          <select name="mode">
+            <option value="pub">Publish (devices send telemetry)</option>
+            <option value="sub">Subscribe</option>
+            <option value="conn">Connect only</option>
+          </select>
+        </label>
+        <label>Topic <input name="topic" value="iot/%i/telemetry"></label>
+        <p class="hint"><code>%i</code> = device number, <code>%c</code> = client ID</p>
+        <div class="row">
+          <label>Publish every (ms) <input name="interval" type="number" min="1" value="10000"></label>
+          <label>Payload (bytes) <input name="size" type="number" min="1" value="256"></label>
+          <label style="flex:.5">QoS <select name="qos"><option>0</option><option>1</option><option>2</option></select></label>
+        </div>
+      </fieldset>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="testBtn">Test connection</button>
+      <button type="submit" class="primary" id="startBtn">Start load test</button>
+      <button type="button" class="danger" id="stopBtn">Stop</button>
+      <span id="msg" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+
+  <section class="section" aria-labelledby="liveTitle">
+    <h2 id="liveTitle" style="font-size:16px">Live status <span id="state" class="sub" style="font-weight:400"></span></h2>
+    <div class="cards">
+      <div class="card"><div class="k">Connected</div><div class="v" id="cConn">0</div></div>
+      <div class="card"><div class="k">Connect failed</div><div class="v" id="cFail">0</div></div>
+      <div class="card"><div class="k">Connect rate /s</div><div class="v" id="cRate">0</div></div>
+      <div class="card"><div class="k">Workers running</div><div class="v" id="cWorkers">0</div></div>
+    </div>
+    <p class="hint">The <code>pub</code> count reported by emqtt-bench is about 2x what the broker receives. Use broker metrics for message rate.</p>
+    <table>
+      <thead><tr><th>Metric</th><th>Total</th><th>Rate /s</th></tr></thead>
+      <tbody id="metrics"><tr><td colspan="3" class="sub">No data yet</td></tr></tbody>
+    </table>
+    <h3 style="font-size:14px;margin:16px 0 6px">Worker log</h3>
+    <pre id="logs">-</pre>
+  </section>
+</main>
+
+<script>
+const f = document.getElementById('f');
+const $ = id => document.getElementById(id);
+const PER_WORKER = 25000;
+const SECRET = ['password', 'key'];  // never saved in the browser
+const fmt = n => Number(n).toLocaleString();
+
+function formData() {
+  const d = {};
+  for (const el of f.elements) {
+    if (!el.name) continue;
+    d[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  return d;
+}
+
+function save() {
+  const d = formData();
+  SECRET.forEach(k => delete d[k]);
+  try { localStorage.setItem('mqtt-lt', JSON.stringify(d)); } catch {}
+}
+
+function load() {
+  let d = {};
+  try { d = JSON.parse(localStorage.getItem('mqtt-lt') || '{}'); } catch {}
+  for (const [k, v] of Object.entries(d)) {
+    const el = f.elements[k];
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+  }
+}
+
+function syncTotal(from) {
+  if (from === 'range') f.elements.total.value = $('totalRange').value;
+  else $('totalRange').value = f.elements.total.value;
+  const n = Math.max(1, Math.ceil((+f.elements.total.value || 0) / PER_WORKER));
+  $('workersHint').textContent = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each`;
+}
+
+function say(text, ok) {
+  $('msg').textContent = text;
+  $('msg').className = ok === undefined ? '' : ok ? 'ok' : 'bad';
+}
+
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+async function withBusy(btn, label, fn) {
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = label;
+  try { await fn(); } catch (e) { say(e.message, false); } finally { btn.disabled = false; btn.textContent = old; }
+}
+
+$('testBtn').onclick = () => withBusy($('testBtn'), 'Testing...', async () => {
+  save(); say('');
+  const r = await post('/api/test', formData());
+  say(r.message, r.ok);
+});
+
+f.onsubmit = e => {
+  e.preventDefault();
+  if (!f.reportValidity()) return;
+  withBusy($('startBtn'), 'Starting...', async () => {
+    save(); say('');
+    await post('/api/start', formData());
+    say('Load test started', true);
+    poll();
+  });
+};
+
+$('stopBtn').onclick = () => withBusy($('stopBtn'), 'Stopping...', async () => {
+  await post('/api/stop');
+  say('Stopped', true);
+  poll();
+});
+
+document.querySelectorAll('input[type=file]').forEach(inp => {
+  inp.onchange = async () => {
+    if (inp.files[0]) f.elements[inp.dataset.target].value = (await inp.files[0].text()).trim();
+  };
+});
+
+$('totalRange').oninput = () => syncTotal('range');
+f.elements.total.oninput = () => syncTotal('input');
+f.onchange = save;
+
+async function poll() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    const t = s.totals;
+    const get = (k, f = 'total') => (t[k] ? t[k][f] : 0);
+    $('cConn').textContent = fmt(get('connect_succ'));
+    $('cFail').textContent = fmt(get('connect_fail'));
+    $('cRate').textContent = fmt(get('connect_succ', 'rate'));
+    const running = s.workers.filter(w => w.status === 'running').length;
+    $('cWorkers').textContent = `${running} / ${s.workers.length}`;
+    $('state').textContent = s.running ? '· running' : s.workers.length ? '· stopped (workers exited)' : '· idle';
+    const rows = Object.entries(t).sort().map(([k, v]) => `<tr><td>${k}</td><td>${fmt(v.total)}</td><td>${fmt(v.rate)}</td></tr>`);
+    $('metrics').innerHTML = rows.join('') || '<tr><td colspan="3" class="sub">No data yet</td></tr>';
+    $('logs').textContent = s.logs.join('\n') || '-';
+  } catch (e) {
+    $('state').textContent = '· UI server unreachable';
+  }
+}
+
+load();
+syncTotal('input');
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>
