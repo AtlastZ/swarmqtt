@@ -7,6 +7,8 @@
 Web UI สำหรับ load test MQTT / MQTTS broker จำลอง IoT device ได้เป็นแสนตัว
 ฝั่ง load ใช้ [emqtt-bench](https://github.com/emqx/emqtt-bench) และฝั่ง UI แตก worker container ให้อัตโนมัติ
 
+![swarmqtt web UI](docs/screenshot.png)
+
 ## ใช้งาน
 
 ```sh
