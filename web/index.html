@@ -172,9 +172,11 @@
         <input id="totalRange" type="range" min="1000" max="200000" step="1000" value="100000" aria-label="Concurrent devices slider" style="width:100%">
         <p class="hint" id="workersHint"></p>
         <div class="row">
-          <label>Connections / sec (total) <input name="rate" type="number" min="1" value="2000" required></label>
+          <label>Conn/sec <input name="rate" type="number" min="1" value="2000" required></label>
           <label>Keepalive (s) <input name="keepalive" type="number" min="5" value="60" required></label>
+          <label>Stop after (s) <input name="duration" type="number" min="0" max="604800" value="600" required></label>
         </div>
+        <p class="hint">Stop after 0 = run until you press Stop</p>
         <label>Mode
           <select name="mode">
             <option value="pub">Publish (devices send telemetry)</option>
@@ -211,6 +213,8 @@
       <div class="card"><div class="k">Connect failed</div><div class="v" id="cFail">0</div></div>
       <div class="card"><div class="k">Connect rate /s</div><div class="v" id="cRate">0</div></div>
       <div class="card"><div class="k">Workers running</div><div class="v" id="cWorkers">0</div></div>
+      <div class="card"><div class="k">Load machine RAM</div><div class="v" id="cMem">-</div></div>
+      <div class="card"><div class="k">Load machine CPU (cores)</div><div class="v" id="cCpu">-</div></div>
     </div>
     <p class="hint">The <code>pub</code> count reported by emqtt-bench is about 2x what the broker receives. Use broker metrics for message rate.</p>
     <table>
@@ -226,6 +230,9 @@
 const f = document.getElementById('f');
 const $ = id => document.getElementById(id);
 const PER_WORKER = 25000;
+const WORKER_MEM = 575 * 2 ** 20, CONN_MEM = 107 * 2 ** 10;  // same estimate as app.py
+const GB = b => (b / 2 ** 30).toFixed(1) + ' GB';
+let memTotal = 0;
 const SECRET = ['password', 'key'];  // never saved in the browser
 const fmt = n => Number(n).toLocaleString();
 
@@ -257,8 +264,14 @@ function load() {
 function syncTotal(from) {
   if (from === 'range') f.elements.total.value = $('totalRange').value;
   else $('totalRange').value = f.elements.total.value;
-  const n = Math.max(1, Math.ceil((+f.elements.total.value || 0) / PER_WORKER));
-  $('workersHint').textContent = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each`;
+  const total = +f.elements.total.value || 0;
+  const n = Math.max(1, Math.ceil(total / PER_WORKER));
+  const need = n * WORKER_MEM + total * CONN_MEM;
+  let text = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each. Needs ~${GB(need)} RAM`;
+  if (memTotal) text += ` of ${GB(memTotal)} in Docker` + (need > memTotal * 0.9 ? ': too much, Start will be refused'
+    : need > memTotal * 0.7 ? ': tight, the load machine may run out first' : '');
+  $('workersHint').textContent = text;
+  $('workersHint').className = 'hint' + (memTotal && need > memTotal * 0.7 ? ' bad' : '');
 }
 
 function say(text, ok) {
@@ -322,7 +335,13 @@ async function poll() {
     $('cRate').textContent = fmt(get('connect_succ', 'rate'));
     const running = s.workers.filter(w => w.status === 'running').length;
     $('cWorkers').textContent = `${running} / ${s.workers.length}`;
-    $('state').textContent = s.running ? '· running' : s.workers.length ? '· stopped (workers exited)' : '· idle';
+    const left = s.ends_in ?? null;
+    const clock = left === null ? '' : `, stops in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    $('state').textContent = s.running ? '· running' + clock : s.workers.length ? '· stopped (workers exited)' : '· idle';
+    const L = s.load;
+    $('cMem').textContent = L.mem_total ? `${(L.mem / 2 ** 30).toFixed(1)} / ${GB(L.mem_total)}` : '-';
+    $('cCpu').textContent = L.ncpu ? `${L.cpu.toFixed(1)} / ${L.ncpu}` : '-';
+    if (L.mem_total !== memTotal) { memTotal = L.mem_total; syncTotal('input'); }
     const rows = Object.entries(t).sort().map(([k, v]) => `<tr><td>${k}</td><td>${fmt(v.total)}</td><td>${fmt(v.rate)}</td></tr>`);
     $('metrics').innerHTML = rows.join('') || '<tr><td colspan="3" class="sub">No data yet</td></tr>';
     $('logs').textContent = s.logs.join('\n') || '-';

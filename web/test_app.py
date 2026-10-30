@@ -30,8 +30,22 @@ class AppTest(unittest.TestCase):
             with open(app.write_certs(cfg, d)["payload"]) as f:
                 self.assertEqual(f.read(), '{"t":%TIMESTAMPMS%}')
 
+    def test_estimate_mem_and_refuse_when_too_big(self):
+        self.assertEqual(app.estimate_mem(100000), 4 * app.WORKER_MEM + 100000 * app.CONN_MEM)
+        app.mem_total = 4 * 2**30
+        try:
+            with self.assertRaises(app.BadRequest):
+                app.start(app.parse_cfg(BASE))  # 100k devices ~13 GB, refused before touching Docker
+        finally:
+            app.mem_total = 0
+
+    def test_duration_defaults_to_unlimited(self):
+        self.assertEqual(app.parse_cfg(BASE)["duration"], 0)
+        self.assertEqual(app.parse_cfg({**BASE, "duration": "600"})["duration"], 600)
+
     def test_parse_cfg_rejects_bad_input(self):
-        for bad in ({"host": "a b"}, {"port": 0}, {"total": 0}, {"mode": "x"}, {"cert": "C"}, {"payload": "x" * (app.MAX_PAYLOAD + 1)}):
+        for bad in ({"host": "a b"}, {"port": 0}, {"total": 0}, {"mode": "x"}, {"cert": "C"}, {"payload": "x" * (app.MAX_PAYLOAD + 1)},
+                    {"duration": -1}):
             with self.assertRaises(app.BadRequest):
                 app.parse_cfg({**BASE, **bad})
 

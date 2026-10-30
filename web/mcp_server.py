@@ -59,6 +59,7 @@ def start_load_test(
     publish_interval_ms: int = 10000,
     payload_bytes: int = 256,
     payload: str = "",
+    duration_sec: int = 600,
     qos: int = 0,
     keepalive: int = 60,
     tls: bool = True,
@@ -77,19 +78,28 @@ def start_load_test(
     `payload` sets custom message content (e.g. JSON) instead of `payload_bytes` random bytes; it may use
     %TIMESTAMP%, %TIMESTAMPMS%, %UNIQUE% (unique number per message, not sequential) and %RANDOM% (payload_bytes random bytes).
     The broker certificate is NOT verified during the load test.
+    The test stops by itself after `duration_sec` (0 = run until stop_load_test). It is refused if the
+    estimated RAM does not fit the Docker host.
     """
     cfg = _cfg(
         host=host, port=port, total=devices, rate=connections_per_sec, mode=mode, topic=topic,
-        interval=publish_interval_ms, size=payload_bytes, payload=payload, qos=qos, keepalive=keepalive, tls=tls,
+        interval=publish_interval_ms, size=payload_bytes, payload=payload, duration=duration_sec, qos=qos, keepalive=keepalive, tls=tls,
         tls_version=tls_version, version=mqtt_version, prefix=client_id_prefix, username=username,
         password=password, cert=client_cert_pem, key=client_key_pem)
-    app.start(cfg)
+    try:
+        app.start(cfg)
+    except app.BadRequest as e:
+        raise ToolError(str(e)) from None
     return {"started": True, "devices": devices, "workers": len(app.plan(devices, connections_per_sec))}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def get_status() -> dict:
     """Live totals (connect_succ, connect_fail, pub, ...), worker containers and recent worker log lines.
+
+    `load` is the load generator itself: worker RAM (bytes) vs Docker's mem_total, and CPU in cores vs ncpu.
+    If it is near the limit, failures come from the load machine, not the broker. `ends_in` is the
+    seconds until the test stops by itself (null = no limit).
 
     The `pub` count from emqtt-bench is about 2x what the broker actually receives.
     """

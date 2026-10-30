@@ -36,19 +36,20 @@ The load generator runs out of memory long before a decent broker does, and a cr
 - workers = ceil(devices / 25,000)
 - 100k TLS devices ≈ 4 × 575 MB + 100k × 107 KB ≈ **13 GB**
 
-Check what Docker has with `docker info --format '{{.MemTotal}} {{.NCPU}}'` (on Docker Desktop / colima this is the VM size, not the host's, and other containers already use part of it). Keep the estimate under ~70% of it. If it doesn't fit, tell the user the maximum this machine can do and offer options: a bigger VM, a Linux box closer to the broker, or several machines each running swarmqtt with a different `client_id_prefix` so client IDs don't collide.
+Check what Docker has with `docker info --format '{{.MemTotal}} {{.NCPU}}'` (on Docker Desktop / colima this is the VM size, not the host's, and other containers already use part of it). Keep the estimate under ~70% of it. `start_load_test` refuses anything above 90% by itself, so treat that error as "this machine is too small", not a broker problem. During the run, `get_status` → `load` shows the workers' actual RAM (vs `mem_total`) and CPU in cores (vs `ncpu`): if either is near the limit, the load machine is the bottleneck and any failures at that step don't count against the broker. If it doesn't fit, tell the user the maximum this machine can do and offer options: a bigger VM, a Linux box closer to the broker, or several machines each running swarmqtt with a different `client_id_prefix` so client IDs don't collide.
 
 ## 4. Run it
 
 1. **`test_connection`** with the real settings and `verify_server_cert=true` if they have the CA. Fix any failure here; it is much cheaper to debug one connection than 100k. Note the connect latency as a baseline.
 2. **Smoke run**: ~100–1,000 devices. Wait until `connect_succ` reaches the target, then read `get_status` twice ~10 s apart. Any `connect_fail` or worker not `running` at this size is a config problem, not a capacity limit: stop and fix it.
-3. **Ramp**: increase in steps (e.g. 1k → 10k → 25k → 50k → 100k, or 2x per step when looking for the limit). `start_load_test` replaces the running test, so each step reconnects everything from zero; that is fine and also tests reconnect storms. At each step, wait for connections to settle, then hold for at least 1–2 minutes (a few keepalive periods) and sample `get_status` every ~15–30 s.
+3. **Ramp**: increase in steps (e.g. 1k → 10k → 25k → 50k → 100k, or 2x per step when looking for the limit). `start_load_test` replaces the running test, so each step reconnects everything from zero; that is fine and also tests reconnect storms. At each step, wait for connections to settle, then hold for at least 1–2 minutes (a few keepalive periods) and sample `get_status` every ~15–30 s. Set `duration_sec` a bit longer than you plan to hold each step (default 600) so a forgotten or interrupted session can't leave load running; `ends_in` in `get_status` shows the seconds left.
 4. Pick a sensible `connections_per_sec`: the TLS handshake is the expensive part for the broker. Start around 500–2,000/s total and raise it only if the goal is to test connection storms.
 
 **Stop the ramp and record the last good step when any of these happens:**
 
 - `connect_fail` above ~1% of the target, or still climbing
 - `connect_succ` stops growing well short of the target for more than a minute
+- `load.mem` near `load.mem_total` or `load.cpu` near `ncpu` (the load machine's limit, not the broker's: report it as such)
 - workers show `exited` (read the log lines in the status: often out of memory or file descriptors on the load side)
 - the broker's own metrics show CPU pinned, memory near the limit, or dropped connections (ask the user for them if you can't see them)
 - the Docker daemon stops responding (load machine overloaded, not the broker)
@@ -97,4 +98,4 @@ Base URL `http://localhost:8080`. All bodies are JSON.
 | GET | `/api/status` | `{running, workers[], totals{metric:{total,rate}}, logs[]}` |
 | POST | `/api/stop` | stop and remove workers |
 
-Fields for `/api/test` and `/api/start`: `host`, `port`, `version` ("3"/"4"/"5"), `username`, `password`, `prefix`, `tls` (bool), `verify` (bool, test only), `tls_version` ("", "tlsv1.2", "tlsv1.3"), `ca`, `cert`, `key` (PEM text), `mode` ("pub"/"sub"/"conn"), `topic` (`%i` device number, `%c` client ID), `qos`, `total` (devices), `rate` (total conn/s), `keepalive`, `interval` (ms), `size` (bytes), `payload` (custom message text, optional). `/api/test` validates the whole form too, so send the same full body as `/api/start`. Errors come back as HTTP 400 with `{"error": "..."}`.
+Fields for `/api/test` and `/api/start`: `host`, `port`, `version` ("3"/"4"/"5"), `username`, `password`, `prefix`, `tls` (bool), `verify` (bool, test only), `tls_version` ("", "tlsv1.2", "tlsv1.3"), `ca`, `cert`, `key` (PEM text), `mode` ("pub"/"sub"/"conn"), `topic` (`%i` device number, `%c` client ID), `qos`, `total` (devices), `rate` (total conn/s), `keepalive`, `interval` (ms), `size` (bytes), `payload` (custom message text, optional), `duration` (seconds, 0 = until stopped; `/api/start` defaults to 0, so set it). `/api/status` also returns `load` and `ends_in`. `/api/test` validates the whole form too, so send the same full body as `/api/start`. Errors come back as HTTP 400 with `{"error": "..."}`.

@@ -20,12 +20,19 @@ LABEL = "swarmqtt"
 PER_WORKER = 25000
 MAX_TOTAL = 1_000_000
 MAX_PAYLOAD = 256 * 1024
+# measured with emqtt-bench + TLS; plain MQTT uses less, so this errs on the safe side
+WORKER_MEM = 575 * 2**20
+CONN_MEM = 107 * 2**10
+MAX_MEM_SHARE = 0.9  # refuse above this share of Docker's RAM: the VM would crash mid-test
 METRIC = re.compile(r"(\w+) total=(\d+) rate=([\d.]+)")
 HOST_RE = re.compile(r"^[A-Za-z0-9.\-:\[\],]+$")
 
 dk = None  # docker client, set in main()
+mem_total = ncpu = 0  # Docker's RAM (bytes) and CPUs, set in main()
 lock = threading.Lock()
 stats = {}  # worker name -> {metric: {"total": int, "rate": float}}
+usage = {}  # worker name -> {"mem": bytes, "cpu": cores}
+run = {"id": 0, "timer": None, "ends_at": None}
 logs = collections.deque(maxlen=200)
 
 
@@ -33,9 +40,9 @@ class BadRequest(Exception):
     pass
 
 
-def _int(cfg, key, lo, hi):
+def _int(cfg, key, lo, hi, default=None):
     try:
-        v = int(cfg.get(key))
+        v = int(cfg.get(key, default))
     except (TypeError, ValueError):
         raise BadRequest(f"{key} must be a number")
     if not lo <= v <= hi:
@@ -70,6 +77,7 @@ def parse_cfg(raw):
         "interval": _int(raw, "interval", 1, 3_600_000),
         "size": _int(raw, "size", 1, 1_048_576),
         "payload": str(raw.get("payload", "")),
+        "duration": _int(raw, "duration", 0, 7 * 86400, 0),  # seconds, 0 = until stopped
     }
     if cfg["version"] not in ("3", "4", "5"):
         raise BadRequest("version must be 3, 4 or 5")
@@ -182,6 +190,10 @@ def plan(total, rate):
     return [(min(PER_WORKER, total - i * PER_WORKER), i * PER_WORKER, per_rate) for i in range(n)]
 
 
+def estimate_mem(total):
+    return math.ceil(total / PER_WORKER) * WORKER_MEM + total * CONN_MEM
+
+
 def workers():
     return dk.containers.list(all=True, filters={"label": LABEL})
 
@@ -205,15 +217,57 @@ def follow(container):
             logs.append(f"[{container.name}] log stream ended: {e}")
 
 
+def watch(container):
+    """Track a worker's RAM and CPU from the Docker stats stream (about one sample per second)."""
+    try:
+        for s in container.stats(stream=True, decode=True):
+            m, c, p = s.get("memory_stats", {}), s.get("cpu_stats", {}), s.get("precpu_stats", {})
+            cpu_d = c.get("cpu_usage", {}).get("total_usage", 0) - p.get("cpu_usage", {}).get("total_usage", 0)
+            sys_d = c.get("system_cpu_usage", 0) - p.get("system_cpu_usage", 0)
+            ms = m.get("stats", {})
+            mem = m.get("usage", 0) - ms.get("inactive_file", ms.get("cache", 0))  # what `docker stats` shows
+            with lock:
+                if not m:  # container stopped
+                    usage.pop(container.name, None)
+                    continue
+                usage[container.name] = {"mem": max(mem, 0),
+                                         "cpu": cpu_d / sys_d * c.get("online_cpus", 1) if sys_d > 0 else 0.0}
+    except Exception:  # container removed
+        pass
+    with lock:
+        usage.pop(container.name, None)
+
+
+def attach(container):
+    for target in (follow, watch):
+        threading.Thread(target=target, args=(container,), daemon=True).start()
+
+
 def stop():
+    with lock:
+        if run["timer"]:
+            run["timer"].cancel()
+        run.update(timer=None, ends_at=None)
     for c in workers():
         c.remove(force=True)
     with lock:
         stats.clear()
+        usage.clear()
+
+
+def expire(run_id):
+    if run["id"] == run_id:  # a newer test may have replaced this one
+        stop()
+        with lock:
+            logs.append("Duration reached: load test stopped")
 
 
 def start(cfg):
     import docker
+    need = estimate_mem(cfg["total"])
+    if mem_total and need > mem_total * MAX_MEM_SHARE:
+        raise BadRequest(f"{cfg['total']:,} devices need ~{need / 2**30:.1f} GB RAM but Docker has "
+                         f"{mem_total / 2**30:.1f} GB: lower the devices, give Docker more RAM, or split across machines")
     stop()
     with lock:
         logs.clear()
@@ -231,7 +285,14 @@ def start(cfg):
             ulimits=[docker.types.Ulimit(name="nofile", soft=1048576, hard=1048576)],
             sysctls={"net.ipv4.ip_local_port_range": "1024 65535"},
             extra_hosts={"host.docker.internal": "host-gateway"})
-        threading.Thread(target=follow, args=(c,), daemon=True).start()
+        attach(c)
+    with lock:
+        run["id"] += 1
+        if cfg["duration"]:
+            run["timer"] = threading.Timer(cfg["duration"], expire, args=(run["id"],))
+            run["timer"].daemon = True
+            run["timer"].start()
+            run["ends_at"] = time.time() + cfg["duration"]
 
 
 def status():
@@ -243,8 +304,12 @@ def status():
                 t = totals.setdefault(k, {"total": 0, "rate": 0.0})
                 t["total"] += v["total"]
                 t["rate"] = round(t["rate"] + v["rate"], 2)
+        load = {"mem": sum(u["mem"] for u in usage.values()), "mem_total": mem_total,
+                "cpu": round(sum(u["cpu"] for u in usage.values()), 2), "ncpu": ncpu}
         return {"running": any(w["status"] == "running" for w in ws), "workers": ws,
-                "totals": totals, "logs": list(logs)[-50:]}
+                "totals": totals, "load": load,
+                # seconds left, not a timestamp: the Docker VM clock can drift from the viewer's
+                "ends_in": run["ends_at"] and max(0, round(run["ends_at"] - time.time())), "logs": list(logs)[-50:]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -289,11 +354,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global dk
+    global dk, mem_total, ncpu
     import docker
     dk = docker.from_env()
-    for c in workers():  # reattach after a web restart
-        threading.Thread(target=follow, args=(c,), daemon=True).start()
+    info = dk.info()
+    mem_total, ncpu = info["MemTotal"], info["NCPU"]
+    for c in workers():  # reattach after a web restart (the duration timer is not restored)
+        attach(c)
     import mcp_server
     threading.Thread(target=mcp_server.serve, daemon=True).start()
     print("Listening on :8080 (UI) and :8081/mcp (MCP)")
