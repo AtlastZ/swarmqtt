@@ -6,9 +6,15 @@ services:
     ports:
       - "127.0.0.1:${UI_PORT:-8080}:8080"   # localhost only: this UI controls Docker
       - "127.0.0.1:${MCP_PORT:-8081}:8081"  # MCP endpoint: /mcp
+      # peer API (only with PEER_TOKEN); set PEER_BIND=0.0.0.0 on machines a controller drives
+      - "${PEER_BIND:-127.0.0.1}:${PEER_PORT:-8082}:8082"
+    environment:
+      PEERS: ${PEERS:-}             # controller: other swarmqtt peer APIs, comma-separated
+      PEER_TOKEN: ${PEER_TOKEN:-}   # same secret on the controller and every peer
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - certs:/certs
+      - data:/data                  # run history
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -16,3 +22,4 @@ services:
 volumes:
   certs:
     name: swarmqtt-certs       # workers mount this by name
+  data:

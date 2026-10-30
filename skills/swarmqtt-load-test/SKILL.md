@@ -36,13 +36,14 @@ The load generator runs out of memory long before a decent broker does, and a cr
 - workers = ceil(devices / 25,000)
 - 100k TLS devices ≈ 4 × 575 MB + 100k × 107 KB ≈ **13 GB**
 
-Check what Docker has with `docker info --format '{{.MemTotal}} {{.NCPU}}'` (on Docker Desktop / colima this is the VM size, not the host's, and other containers already use part of it). Keep the estimate under ~70% of it. `start_load_test` refuses anything above 90% by itself, so treat that error as "this machine is too small", not a broker problem. During the run, `get_status` → `load` shows the workers' actual RAM (vs `mem_total`) and CPU in cores (vs `ncpu`): if either is near the limit, the load machine is the bottleneck and any failures at that step don't count against the broker. If it doesn't fit, tell the user the maximum this machine can do and offer options: a bigger VM, a Linux box closer to the broker, or several machines each running swarmqtt with a different `client_id_prefix` so client IDs don't collide.
+Check what Docker has with `docker info --format '{{.MemTotal}} {{.NCPU}}'` (on Docker Desktop / colima this is the VM size, not the host's, and other containers already use part of it). Keep the estimate under ~70% of it. `start_load_test` refuses anything above 90% by itself, so treat that error as "this machine is too small", not a broker problem. During the run, `get_status` → `load` shows the workers' actual RAM (vs `mem_total`) and CPU in cores (vs `ncpu`): if either is near the limit, the load machine is the bottleneck and any failures at that step don't count against the broker. Plain MQTT is lighter (~40 KB per connection). If it doesn't fit, tell the user the maximum this machine can do and offer options: a bigger VM, a Linux box closer to the broker, or peers: other machines running swarmqtt that this one drives (`PEERS` + `PEER_TOKEN` in the repo README). With peers, `start_load_test` splits devices across machines and `get_status` sums them; only this machine's RAM is checked up front, each peer refuses its own share if it won't fit.
 
 ## 4. Run it
 
 1. **`test_connection`** with the real settings and `verify_server_cert=true` if they have the CA. Fix any failure here; it is much cheaper to debug one connection than 100k. Note the connect latency as a baseline.
 2. **Smoke run**: ~100–1,000 devices. Wait until `connect_succ` reaches the target, then read `get_status` twice ~10 s apart. Any `connect_fail` or worker not `running` at this size is a config problem, not a capacity limit: stop and fix it.
-3. **Ramp**: increase in steps (e.g. 1k → 10k → 25k → 50k → 100k, or 2x per step when looking for the limit). `start_load_test` replaces the running test, so each step reconnects everything from zero; that is fine and also tests reconnect storms. At each step, wait for connections to settle, then hold for at least 1–2 minutes (a few keepalive periods) and sample `get_status` every ~15–30 s. Set `duration_sec` a bit longer than you plan to hold each step (default 600) so a forgotten or interrupted session can't leave load running; `ends_in` in `get_status` shows the seconds left.
+3. **Ramp**: let swarmqtt do it: `start_load_test` with `ramp_steps` (e.g. `[1000, 10000, 25000, 50000, 100000]`, or 2x per step when looking for the limit), `hold_sec` of at least 60–120 (a few keepalive periods) and `fail_pct` (default 1). It runs each step, waits for connections to settle, holds, and stops at the first step that fails, recording why. Each step reconnects everything from zero, which also tests reconnect storms. Poll `get_status` every ~30 s meanwhile (`run.steps` fills in as steps finish) rather than tight-looping. For a fixed target instead of a limit, use `devices` + `duration_sec` (default 600, so a forgotten session can't leave load running; `ends_in` shows the seconds left).
+   Add `subscribers` (1–2 is enough) whenever message throughput or latency matters: you get delivered msg/s (the real rate) and publish-to-receive latency per step. It prepends an 8-byte binary timestamp to every payload, so warn the user if real consumers parse those topics.
 4. Pick a sensible `connections_per_sec`: the TLS handshake is the expensive part for the broker. Start around 500–2,000/s total and raise it only if the goal is to test connection storms.
 
 **Stop the ramp and record the last good step when any of these happens:**
@@ -64,11 +65,11 @@ Check what Docker has with `docker info --format '{{.MemTotal}} {{.NCPU}}'` (on 
 
 ## 6. Always clean up
 
-Call `stop_load_test` when finished, when aborting, and before handing back to the user if anything went wrong. Leftover workers keep hammering the broker and holding gigabytes of RAM. Confirm with `get_status` that `workers` is empty.
+Call `stop_load_test` when finished, when aborting, and before handing back to the user if anything went wrong. Leftover workers keep hammering the broker and holding gigabytes of RAM. Confirm with `get_status` that `workers` is empty. (A ramp cleans up by itself when it ends; stopping is still harmless.)
 
 ## 7. Report
 
-Use this structure:
+Every run is recorded. Call `get_run(run_id)`: it gives a one-line `headline`, per-step results, and links to a **PDF report** (setup, steps table, charts, caveats), CSV and JSON on the web UI. Always give the user the PDF link. Then summarise in this structure, using the step results rather than your own sampling:
 
 ```
 # MQTT load test: <broker host:port>
@@ -95,7 +96,9 @@ Base URL `http://localhost:8080`. All bodies are JSON.
 |---|---|---|
 | POST | `/api/test` | test one connection |
 | POST | `/api/start` | start/replace the load test |
-| GET | `/api/status` | `{running, workers[], totals{metric:{total,rate}}, logs[]}` |
+| GET | `/api/status` | `{running, workers[], totals{metric:{total,rate}}, load, latency_ms, run{id,status,steps[],samples[]}, ends_in, logs[]}` |
+| GET | `/api/runs` | recorded runs, newest first |
+| GET | `/api/runs/<id>` | one run (`.json` / `.csv` to download, `/report.pdf` for the PDF) |
 | POST | `/api/stop` | stop and remove workers |
 
-Fields for `/api/test` and `/api/start`: `host`, `port`, `version` ("3"/"4"/"5"), `username`, `password`, `prefix`, `tls` (bool), `verify` (bool, test only), `tls_version` ("", "tlsv1.2", "tlsv1.3"), `ca`, `cert`, `key` (PEM text), `mode` ("pub"/"sub"/"conn"), `topic` (`%i` device number, `%c` client ID), `qos`, `total` (devices), `rate` (total conn/s), `keepalive`, `interval` (ms), `size` (bytes), `payload` (custom message text, optional), `duration` (seconds, 0 = until stopped; `/api/start` defaults to 0, so set it). `/api/status` also returns `load` and `ends_in`. `/api/test` validates the whole form too, so send the same full body as `/api/start`. Errors come back as HTTP 400 with `{"error": "..."}`.
+Fields for `/api/test` and `/api/start`: `host`, `port`, `version` ("3"/"4"/"5"), `username`, `password`, `prefix`, `tls` (bool), `verify` (bool, test only), `tls_version` ("", "tlsv1.2", "tlsv1.3"), `ca`, `cert`, `key` (PEM text), `mode` ("pub"/"sub"/"conn"), `topic` (`%i` device number, `%c` client ID), `qos`, `total` (devices), `rate` (total conn/s), `keepalive`, `interval` (ms), `size` (bytes), `payload` (custom message text, optional), `duration` (seconds, 0 = until stopped; `/api/start` defaults to 0, so set it), `steps` ("1000,10000" or a list: ramp), `hold` (s per step), `fail_pct`, `subscribers`, `sub_topic`. `/api/start` returns `run_id`. `/api/test` validates the whole form too, so send the same full body as `/api/start`. Errors come back as HTTP 400 with `{"error": "..."}`.

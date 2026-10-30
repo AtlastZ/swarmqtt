@@ -13,7 +13,9 @@ mcp = MCPServer(
     instructions=(
         "Load test MQTT/MQTTS brokers with simulated IoT devices. "
         "Always call test_connection first, start small (e.g. 1000 devices) and check get_status "
-        "before scaling up. Only target brokers the user owns or is allowed to test."
+        "before scaling up. To find a broker's limit, pass ramp_steps and let swarmqtt step up and judge each "
+        "step. Every run is recorded: list_runs / get_run give the results and a PDF report link. "
+        "Only target brokers the user owns or is allowed to test."
     ),
 )
 
@@ -60,6 +62,11 @@ def start_load_test(
     payload_bytes: int = 256,
     payload: str = "",
     duration_sec: int = 600,
+    ramp_steps: list[int] | None = None,
+    hold_sec: int = 60,
+    fail_pct: float = 1.0,
+    subscribers: int = 0,
+    sub_topic: str = "",
     qos: int = 0,
     keepalive: int = 60,
     tls: bool = True,
@@ -80,23 +87,35 @@ def start_load_test(
     The broker certificate is NOT verified during the load test.
     The test stops by itself after `duration_sec` (0 = run until stop_load_test). It is refused if the
     estimated RAM does not fit the Docker host.
+
+    Ramp: `ramp_steps` (e.g. [1000, 10000, 50000]) runs each device count in turn (replacing `devices` and
+    `duration_sec`), holds it `hold_sec` once connected, and stops at the first step where connect failures
+    exceed `fail_pct`% or under 99% connect. Each step reconnects all devices from zero.
+
+    `subscribers` > 0 adds that many subscriber clients on `sub_topic` (default: the topic with %i/%c
+    replaced by +) to measure received msg/s and publish-to-receive latency. This prepends an 8-byte binary
+    timestamp to every payload.
     """
     cfg = _cfg(
         host=host, port=port, total=devices, rate=connections_per_sec, mode=mode, topic=topic,
-        interval=publish_interval_ms, size=payload_bytes, payload=payload, duration=duration_sec, qos=qos, keepalive=keepalive, tls=tls,
+        interval=publish_interval_ms, size=payload_bytes, payload=payload, duration=duration_sec,
+        steps=ramp_steps or [], hold=hold_sec, fail_pct=fail_pct, subscribers=subscribers, sub_topic=sub_topic, qos=qos, keepalive=keepalive, tls=tls,
         tls_version=tls_version, version=mqtt_version, prefix=client_id_prefix, username=username,
         password=password, cert=client_cert_pem, key=client_key_pem)
     try:
         app.start(cfg)
     except app.BadRequest as e:
         raise ToolError(str(e)) from None
-    return {"started": True, "devices": devices, "workers": len(app.plan(devices, connections_per_sec))}
+    return {"started": True, "run_id": app.current.record["id"], "devices": cfg["total"],
+            "ramp_steps": cfg["steps"], "workers": len(app.plan(cfg["total"], connections_per_sec))}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def get_status() -> dict:
     """Live totals (connect_succ, connect_fail, pub, ...), worker containers and recent worker log lines.
 
+    `run` has the current run's id, status, finished `steps` (with ok/reason) and recent samples.
+    `latency_ms` is the subscribers' average publish-to-receive latency (needs subscribers > 0).
     `load` is the load generator itself: worker RAM (bytes) vs Docker's mem_total, and CPU in cores vs ncpu.
     If it is near the limit, failures come from the load machine, not the broker. `ends_in` is the
     seconds until the test stops by itself (null = no limit).
@@ -111,6 +130,32 @@ def stop_load_test() -> dict:
     """Stop the load test and remove all worker containers."""
     app.stop()
     return {"stopped": True}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def list_runs() -> list:
+    """Past and current runs, newest first: id, broker, status, largest step and largest step that passed."""
+    return app.list_runs()
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def get_run(run_id: str) -> dict:
+    """One run's result: headline, settings (no secrets), per-step results, and links to the full data.
+
+    The PDF report, CSV and JSON links are on the swarmqtt web UI (http://localhost:8080 unless UI_PORT is
+    changed); give them to the user.
+    """
+    import report
+    try:
+        r = app.load_run(run_id)
+    except app.BadRequest as e:
+        raise ToolError(str(e)) from None
+    if r is None:
+        raise ToolError(f"run {run_id} not found")
+    base = f"http://localhost:8080/api/runs/{run_id}"
+    return {"id": r["id"], "status": r["status"], "headline": report.headline(r), "settings": r["cfg"],
+            "steps": r["steps"], "samples": len(r["samples"]),
+            "report_pdf": base + "/report.pdf", "csv": base + ".csv", "json": base + ".json"}
 
 
 def serve():

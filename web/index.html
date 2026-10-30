@@ -92,6 +92,20 @@
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   pre { background: var(--code); border: 1px solid var(--border); border-radius: 6px; padding: 10px; max-height: 260px; overflow: auto; font-size: 12px; margin: 0; white-space: pre-wrap; word-break: break-all; }
   .section { margin-top: 16px; }
+  .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  /* chart series: validated categorical slots 1-2 (dark steps) + neutral reference */
+  :root { --series-1: #3987e5; --series-2: #d95926; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin: 12px 0; }
+  .chart { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+  .chart h3 { font-size: 13px; margin: 0 0 4px; font-weight: 600; }
+  .chart svg { display: block; overflow: visible; }
+  .chart text { fill: var(--muted); font: 11px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+  .chart text.ink { fill: var(--text); }
+  .chart .grid-line { stroke: var(--border); }
+  .tip { position: absolute; pointer-events: none; background: var(--space); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; white-space: nowrap; z-index: 1; }
+  .tip i { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 6px; }
+  details summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
+  td a { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -121,6 +135,7 @@
 
   <form id="f" autocomplete="off">
     <div class="grid">
+      <div class="stack">
       <fieldset>
         <legend>Broker</legend>
         <div class="row">
@@ -139,6 +154,24 @@
           <label>Password <input name="password" type="password"></label>
         </div>
       </fieldset>
+
+      <fieldset>
+        <legend>Ramp &amp; latency (optional)</legend>
+        <label>Ramp steps (devices)
+          <input name="steps" placeholder="e.g. 1000, 10000, 50000, 100000" inputmode="numeric">
+        </label>
+        <div class="row">
+          <label>Hold each step (s) <input name="hold" type="number" min="10" max="3600" value="60"></label>
+          <label>Fail above (%) <input name="fail_pct" type="number" min="0" max="100" step="0.1" value="1"></label>
+        </div>
+        <p class="hint">Runs each step in turn and stops at the first one with more connect failures than this, or under 99% connected. Replaces Concurrent devices and Stop after.</p>
+        <div class="row">
+          <label>Latency subscribers <input name="subscribers" type="number" min="0" value="0"></label>
+          <label>Subscribe topic <input name="sub_topic" placeholder="auto: iot/+/telemetry"></label>
+        </div>
+        <p class="hint">Measures delivered msg/s and publish-to-receive latency (publish mode). Adds an 8-byte binary timestamp to the front of every payload.</p>
+      </fieldset>
+      </div>
 
       <fieldset>
         <legend>TLS / Certificates</legend>
@@ -215,8 +248,24 @@
       <div class="card"><div class="k">Workers running</div><div class="v" id="cWorkers">0</div></div>
       <div class="card"><div class="k">Load machine RAM</div><div class="v" id="cMem">-</div></div>
       <div class="card"><div class="k">Load machine CPU (cores)</div><div class="v" id="cCpu">-</div></div>
+      <div class="card"><div class="k">Delivered /s (per subscriber)</div><div class="v" id="cRecv">-</div></div>
+      <div class="card"><div class="k">Latency (avg)</div><div class="v" id="cLat">-</div></div>
     </div>
-    <p class="hint">The <code>pub</code> count reported by emqtt-bench is about 2x what the broker receives. Use broker metrics for message rate.</p>
+    <div class="charts">
+      <div class="chart"><h3>Devices connected</h3><div id="chConn"></div></div>
+      <div class="chart"><h3>Messages per second</h3><div id="chMsg"></div></div>
+      <div class="chart"><h3>Latency (ms, average)</h3><div id="chLat"></div></div>
+      <div class="chart"><h3>Load machine RAM (GB)</h3><div id="chMem"></div></div>
+    </div>
+    <p class="hint">* emqtt-bench counts each publish about twice. Delivered (what one latency subscriber received) or broker metrics show the real message rate.</p>
+    <div id="stepsBox" hidden>
+      <h3 style="font-size:14px;margin:16px 0 6px">Ramp steps</h3>
+      <table>
+        <thead><tr><th>Devices</th><th>Connected</th><th>Failed</th><th>Held</th><th>Delivered /s</th><th>Latency</th><th>Peak RAM</th><th>Result</th></tr></thead>
+        <tbody id="stepsBody"></tbody>
+      </table>
+    </div>
+    <h3 style="font-size:14px;margin:16px 0 6px">emqtt-bench totals</h3>
     <table>
       <thead><tr><th>Metric</th><th>Total</th><th>Rate /s</th></tr></thead>
       <tbody id="metrics"><tr><td colspan="3" class="sub">No data yet</td></tr></tbody>
@@ -224,13 +273,23 @@
     <h3 style="font-size:14px;margin:16px 0 6px">Worker log</h3>
     <pre id="logs">-</pre>
   </section>
+
+  <section class="section" aria-labelledby="histTitle">
+    <h2 id="histTitle" style="font-size:16px">Run history</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Started</th><th>Broker</th><th>Devices</th><th>Held</th><th>Status</th><th>Download</th></tr></thead>
+        <tbody id="runsBody"><tr><td colspan="6" class="sub">No runs yet</td></tr></tbody>
+      </table>
+    </div>
+  </section>
 </main>
 
 <script>
 const f = document.getElementById('f');
 const $ = id => document.getElementById(id);
 const PER_WORKER = 25000;
-const WORKER_MEM = 575 * 2 ** 20, CONN_MEM = 107 * 2 ** 10;  // same estimate as app.py
+const WORKER_MEM = 575 * 2 ** 20, CONN_MEM = 107 * 2 ** 10, CONN_MEM_PLAIN = 50 * 2 ** 10;  // same estimate as app.py
 const GB = b => (b / 2 ** 30).toFixed(1) + ' GB';
 let memTotal = 0;
 const SECRET = ['password', 'key'];  // never saved in the browser
@@ -264,10 +323,13 @@ function load() {
 function syncTotal(from) {
   if (from === 'range') f.elements.total.value = $('totalRange').value;
   else $('totalRange').value = f.elements.total.value;
-  const total = +f.elements.total.value || 0;
+  const steps = f.elements.steps.value.split(/[\s,]+/).filter(Boolean).map(Number).filter(n => n > 0);
+  const total = steps.length ? Math.max(...steps) : +f.elements.total.value || 0;
+  const subs = +f.elements.subscribers.value || 0;
   const n = Math.max(1, Math.ceil(total / PER_WORKER));
-  const need = n * WORKER_MEM + total * CONN_MEM;
-  let text = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each. Needs ~${GB(need)} RAM`;
+  const est = c => Math.ceil(c / PER_WORKER) * WORKER_MEM + c * (f.elements.tls.checked ? CONN_MEM : CONN_MEM_PLAIN);
+  const need = est(total) + est(subs);  // subscribers run in their own worker(s)
+  let text = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each${steps.length ? ` (largest ramp step ${fmt(total)})` : ''}. Needs ~${GB(need)} RAM`;
   if (memTotal) text += ` of ${GB(memTotal)} in Docker` + (need > memTotal * 0.9 ? ': too much, Start will be refused'
     : need > memTotal * 0.7 ? ': tight, the load machine may run out first' : '');
   $('workersHint').textContent = text;
@@ -305,6 +367,7 @@ f.onsubmit = e => {
     save(); say('');
     await post('/api/start', formData());
     say('Load test started', true);
+    runsKey = '';
     poll();
   });
 };
@@ -322,8 +385,82 @@ document.querySelectorAll('input[type=file]').forEach(inp => {
 });
 
 $('totalRange').oninput = () => syncTotal('range');
-f.elements.total.oninput = () => syncTotal('input');
-f.onchange = save;
+f.elements.total.oninput = f.elements.steps.oninput = f.elements.subscribers.oninput = () => syncTotal('input');
+f.onchange = () => { save(); syncTotal('input'); };  // TLS on/off changes the RAM estimate
+
+const esc = v => String(v).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const dur = sec => sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`;
+const short = v => Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : Math.abs(v) >= 1e3 ? (v / 1e3).toFixed(1) + 'k'
+  : v >= 10 || v === 0 ? Math.round(v).toString() : v.toFixed(1);
+
+/* Line chart over run samples. series: [{label, key, color, dash, scale}]; one shared y-axis.
+   Hover shows a crosshair and every series' value at that moment. */
+function chart(el, rows, series) {
+  series = series.filter(sr => rows.some(r => r[sr.key] != null));
+  if (rows.length < 2 || !series.length) { el.innerHTML = '<p class="hint" style="margin:8px 0">No data yet</p>'; return; }
+  const W = el.clientWidth || 320, H = 150, L = 40, R = 76, T = 8, B = 22;
+  const val = (r, sr) => r[sr.key] == null ? null : r[sr.key] * (sr.scale || 1);
+  const max = Math.max(...rows.flatMap(r => series.map(sr => val(r, sr) || 0))) || 1;
+  const top = max * 1.1, x0 = rows[0].t, span = Math.max(rows[rows.length - 1].t - x0, 1);
+  const X = t => L + (t - x0) / span * (W - L - R), Y = v => T + (1 - v / top) * (H - T - B);
+  let g = '';
+  for (const v of [0, max / 2, max]) {
+    g += `<line class="grid-line" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/>`
+       + `<text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${short(v)}</text>`;
+  }
+  g += `<text x="${L}" y="${H - 4}">0:00</text><text x="${W - R}" y="${H - 4}" text-anchor="end">${dur(Math.round(span))}</text>`;
+  const used = [];
+  for (const sr of series) {
+    const pts = rows.filter(r => val(r, sr) != null).map(r => `${X(r.t).toFixed(1)},${Y(val(r, sr)).toFixed(1)}`);
+    g += `<polyline points="${pts.join(' ')}" fill="none" stroke="${sr.color}" stroke-width="2" stroke-linejoin="round"${sr.dash ? ' stroke-dasharray="4 3"' : ''}/>`;
+    const last = rows.filter(r => val(r, sr) != null).pop();
+    let y = Y(val(last, sr)) + 4;
+    while (used.some(u => Math.abs(u - y) < 13)) y += 13;  // keep end labels from overlapping
+    used.push(y);
+    g += `<line x1="${W - R + 6}" x2="${W - R + 16}" y1="${y - 4}" y2="${y - 4}" stroke="${sr.color}" stroke-width="2"${sr.dash ? ' stroke-dasharray="3 2"' : ''}/>`
+       + `<text class="ink" x="${W - R + 20}" y="${y}">${sr.label}</text>`;
+  }
+  const name = el.closest('.chart').querySelector('h3').textContent;
+  el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(name)} over the last ${dur(Math.round(span))}">${g}`
+    + `<line class="cross" y1="${T}" y2="${H - B}" stroke="var(--muted)" visibility="hidden"/></svg><div class="tip" hidden></div>`;
+  const svg = el.querySelector('svg'), cross = el.querySelector('.cross'), tip = el.querySelector('.tip');
+  const show = px => {
+    const t = x0 + (px - L) / (W - L - R) * span;
+    const r = rows.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
+    cross.setAttribute('x1', X(r.t)); cross.setAttribute('x2', X(r.t)); cross.setAttribute('visibility', 'visible');
+    tip.innerHTML = `<div class="sub" style="margin:0">${dur(Math.round(r.t - x0))} · ${fmt(r.devices)} devices</div>`
+      + series.map(sr => `<div><i style="background:${sr.color}"></i>${sr.label}: <b>${val(r, sr) == null ? '-' : fmt(+val(r, sr).toFixed(2))}</b></div>`).join('');
+    tip.hidden = false;
+    const x = X(r.t) + 14;
+    tip.style.left = (x + tip.offsetWidth > W ? X(r.t) - tip.offsetWidth - 2 : x) + 'px';
+    tip.style.top = '28px';
+  };
+  svg.onmousemove = e => { el._hx = e.clientX - svg.getBoundingClientRect().left; show(el._hx); };
+  svg.onmouseleave = () => { el._hx = null; cross.setAttribute('visibility', 'hidden'); tip.hidden = true; };
+  if (el._hx != null) show(el._hx);  // keep the tooltip open across the 2 s refresh
+}
+
+function drawCharts(rows) {
+  const S1 = 'var(--series-1)', S2 = 'var(--series-2)', REF = 'var(--muted)';
+  chart($('chConn'), rows, [{ label: 'connected', key: 'connected', color: S1 }, { label: 'target', key: 'devices', color: REF, dash: true }]);
+  const subs = rows.some(r => r.recv_rate > 0);
+  chart($('chMsg'), rows, [{ label: 'published*', key: 'pub_rate', color: S1 }].concat(subs ? [{ label: 'delivered', key: 'recv_rate', color: S2 }] : []));
+  chart($('chLat'), rows, [{ label: 'latency', key: 'latency_ms', color: S1 }]);
+  chart($('chMem'), rows, [{ label: 'used', key: 'mem', color: S1, scale: 2 ** -30 }, { label: 'available', key: 'mem_total', color: REF, dash: true, scale: 2 ** -30 }]);
+}
+
+let runsKey = '';
+async function loadRuns() {
+  const runs = await (await fetch('/api/runs')).json();
+  $('runsBody').innerHTML = runs.map(r => {
+    const base = `/api/runs/${r.id}`;
+    const status = r.status === 'done' || r.status === 'running' ? esc(r.status) : `<span class="bad">${esc(r.status)}</span>`;
+    return `<tr><td>${new Date(r.started * 1000).toLocaleString()}</td><td>${esc(r.host)}:${r.port}</td>`
+      + `<td>${fmt(r.devices)}${r.steps > 1 ? ` <span class="sub">(${r.steps} steps)</span>` : ''}</td><td>${r.max_ok ? fmt(r.max_ok) : '-'}</td>`
+      + `<td title="${esc(r.reason)}">${status}</td>`
+      + `<td><a href="${base}/report.pdf">PDF report</a> · <a href="${base}.csv">CSV</a> · <a href="${base}.json">JSON</a></td></tr>`;
+  }).join('') || '<tr><td colspan="6" class="sub">No runs yet</td></tr>';
+}
 
 async function poll() {
   try {
@@ -337,7 +474,18 @@ async function poll() {
     $('cWorkers').textContent = `${running} / ${s.workers.length}`;
     const left = s.ends_in ?? null;
     const clock = left === null ? '' : `, stops in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
-    $('state').textContent = s.running ? '· running' + clock : s.workers.length ? '· stopped (workers exited)' : '· idle';
+    const run = s.run, samples = run ? run.samples : [], last = samples[samples.length - 1];
+    const level = run && run.active && last ? ` ${fmt(last.devices)} devices` : '';
+    $('state').textContent = s.running ? '· running' + level + clock : s.workers.length ? '· stopped (workers exited)' : '· idle';
+    $('cRecv').textContent = run && run.active && last && last.recv_rate ? fmt(last.recv_rate) : '-';
+    $('cLat').textContent = s.latency_ms != null ? `${s.latency_ms} ms` : '-';
+    drawCharts(samples);
+    $('stepsBox').hidden = !(run && run.steps.length);
+    if (run) $('stepsBody').innerHTML = run.steps.map(x => `<tr><td>${fmt(x.devices)}</td><td>${fmt(x.connected)}</td><td>${fmt(x.failed)}</td>`
+      + `<td>${dur(x.held_s)}</td><td>${x.recv_rate ? fmt(x.recv_rate) : '-'}</td><td>${x.latency_ms != null ? x.latency_ms + ' ms' : '-'}</td>`
+      + `<td>${GB(x.peak_mem)}</td><td>${x.ok ? '<span class="ok">pass</span>' : `<span class="bad">fail</span> ${esc(x.reason)}`}</td></tr>`).join('');
+    const key = run ? `${run.id}/${run.status}/${run.steps.length}` : '';
+    if (key !== runsKey) { runsKey = key; loadRuns(); }
     const L = s.load;
     $('cMem').textContent = L.mem_total ? `${(L.mem / 2 ** 30).toFixed(1)} / ${GB(L.mem_total)}` : '-';
     $('cCpu').textContent = L.ncpu ? `${L.cpu.toFixed(1)} / ${L.ncpu}` : '-';
@@ -353,6 +501,7 @@ async function poll() {
 load();
 syncTotal('input');
 poll();
+loadRuns();
 setInterval(poll, 2000);
 </script>
 </body>
