@@ -1,7 +1,7 @@
 FROM python:3.12-slim
-RUN pip install --no-cache-dir paho-mqtt==2.1.0 docker==7.1.0 mcp==2.3.0
+RUN pip install --no-cache-dir paho-mqtt==2.1.0 docker==7.1.0 mcp==2.3.0 reportlab==4.2.5
 WORKDIR /app
-COPY app.py mcp_server.py index.html test_app.py ./
-EXPOSE 8080 8081
+COPY app.py mcp_server.py report.py index.html test_app.py ./
+EXPOSE 8080 8081 8082
 # run as module "app" (not __main__) so mcp_server shares its state
 CMD ["python", "-u", "-c", "import app; app.main()"]
