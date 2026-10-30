@@ -189,6 +189,10 @@
           <label>Payload (bytes) <input name="size" type="number" min="1" value="256"></label>
           <label style="flex:.5">QoS <select name="qos"><option>0</option><option>1</option><option>2</option></select></label>
         </div>
+        <label>Custom payload (optional, publish mode)
+          <textarea name="payload" placeholder='{"device":"sensor","temp":24.5,"ts":%TIMESTAMPMS%,"seq":%UNIQUE%}'></textarea>
+        </label>
+        <p class="hint">Sent as-is instead of random bytes. Variables: <code>%TIMESTAMP%</code> <code>%TIMESTAMPMS%</code> <code>%UNIQUE%</code> (unique number, not sequential) <code>%RANDOM%</code> (Payload bytes of random data). Empty = random bytes of Payload size.</p>
       </fieldset>
     </div>
 

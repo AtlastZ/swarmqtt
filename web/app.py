@@ -19,6 +19,7 @@ LABEL = "swarmqtt"
 # Each worker container has its own IP, so it gets its own ~64k source ports to the broker.
 PER_WORKER = 25000
 MAX_TOTAL = 1_000_000
+MAX_PAYLOAD = 256 * 1024
 METRIC = re.compile(r"(\w+) total=(\d+) rate=([\d.]+)")
 HOST_RE = re.compile(r"^[A-Za-z0-9.\-:\[\],]+$")
 
@@ -68,6 +69,7 @@ def parse_cfg(raw):
         "keepalive": _int(raw, "keepalive", 5, 3600),
         "interval": _int(raw, "interval", 1, 3_600_000),
         "size": _int(raw, "size", 1, 1_048_576),
+        "payload": str(raw.get("payload", "")),
     }
     if cfg["version"] not in ("3", "4", "5"):
         raise BadRequest("version must be 3, 4 or 5")
@@ -75,6 +77,8 @@ def parse_cfg(raw):
         raise BadRequest("mode must be pub, sub or conn")
     if cfg["tls_version"] not in ("", "tlsv1.2", "tlsv1.3"):
         raise BadRequest("tls_version must be empty, tlsv1.2 or tlsv1.3")
+    if len(cfg["payload"].encode()) > MAX_PAYLOAD:
+        raise BadRequest(f"payload must be at most {MAX_PAYLOAD} bytes")
     if bool(cfg["cert"]) != bool(cfg["key"]):
         raise BadRequest("client certificate and client key must be given together")
     if cfg["mode"] != "conn" and (not cfg["topic"] or any(c.isspace() for c in cfg["topic"])):
@@ -84,16 +88,31 @@ def parse_cfg(raw):
 
 def write_certs(cfg, directory):
     paths = {}
-    for name, fname in (("ca", "ca.crt"), ("cert", "client.crt"), ("key", "client.key")):
+    for name, fname in (("ca", "ca.crt"), ("cert", "client.crt"), ("key", "client.key"), ("payload", "payload.txt")):
         path = os.path.join(directory, fname)
         if cfg[name]:
             with open(path, "w") as f:
-                f.write(cfg[name] + "\n")
+                f.write(cfg[name] if name == "payload" else cfg[name] + "\n")  # payload is sent byte for byte
             os.chmod(path, 0o644)  # bench runs as a different user in its own container
             paths[name] = path
         elif os.path.exists(path):
             os.remove(path)
     return paths
+
+
+def tls_context(cfg, files):
+    if cfg["verify"]:
+        ctx = ssl.create_default_context(cafile=files.get("ca"))  # no CA given: system CAs
+    else:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    if cfg["tls_version"]:
+        v = {"tlsv1.2": ssl.TLSVersion.TLSv1_2, "tlsv1.3": ssl.TLSVersion.TLSv1_3}[cfg["tls_version"]]
+        ctx.minimum_version = ctx.maximum_version = v
+    if "cert" in files:
+        ctx.load_cert_chain(files["cert"], files["key"])
+    return ctx
 
 
 def test_connection(cfg):
@@ -104,9 +123,10 @@ def test_connection(cfg):
         if cfg["username"]:
             c.username_pw_set(cfg["username"], cfg["password"] or None)
         if cfg["tls"]:
-            c.tls_set(ca_certs=files.get("ca"), certfile=files.get("cert"), keyfile=files.get("key"),
-                      cert_reqs=ssl.CERT_REQUIRED if cfg["verify"] else ssl.CERT_NONE)
-            c.tls_insecure_set(not cfg["verify"])
+            try:
+                c.tls_set_context(tls_context(cfg, files))
+            except (OSError, ssl.SSLError) as e:  # unreadable PEM
+                return {"ok": False, "message": f"Bad certificate/key: {type(e).__name__}: {e}"}
         result, done = {}, threading.Event()
 
         def on_connect(client, userdata, flags, reason_code, properties):
@@ -122,10 +142,12 @@ def test_connection(cfg):
         c.loop_start()
         try:
             if not done.wait(10):
-                return {"ok": False, "message": "Timed out waiting for CONNACK (10s)"}
+                return {"ok": False, "message": "No CONNACK within 10s: check MQTT vs MQTTS for this port, "
+                                                "or the broker may require a client certificate"}
             ms = round((time.monotonic() - t0) * 1000)
             if result["ok"]:
-                return {"ok": True, "message": f"Connected in {ms} ms ({'MQTTS' if cfg['tls'] else 'MQTT'})"}
+                proto = f"MQTTS, {c.socket().version()}" if cfg["tls"] else "MQTT"
+                return {"ok": True, "message": f"Connected in {ms} ms ({proto})"}
             return {"ok": False, "message": f"Broker refused: {result['rc']}"}
         finally:
             c.disconnect()
@@ -146,6 +168,8 @@ def bench_args(cfg, count, start, rate):
             args += ["--certfile", f"{CERTS_DIR}/client.crt", "--keyfile", f"{CERTS_DIR}/client.key"]
     if cfg["mode"] == "pub":
         args += ["-t", cfg["topic"], "-I", str(cfg["interval"]), "-s", str(cfg["size"]), "-q", str(cfg["qos"])]
+        if cfg["payload"]:  # via a file so any content (JSON, quotes, newlines) survives
+            args += ["-m", f"template://{CERTS_DIR}/payload.txt"]
     elif cfg["mode"] == "sub":
         args += ["-t", cfg["topic"], "-q", str(cfg["qos"])]
     return args
@@ -270,7 +294,9 @@ def main():
     dk = docker.from_env()
     for c in workers():  # reattach after a web restart
         threading.Thread(target=follow, args=(c,), daemon=True).start()
-    print("Listening on :8080")
+    import mcp_server
+    threading.Thread(target=mcp_server.serve, daemon=True).start()
+    print("Listening on :8080 (UI) and :8081/mcp (MCP)")
     ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 
 

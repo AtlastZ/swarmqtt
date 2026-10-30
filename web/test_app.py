@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 import app
@@ -20,10 +21,26 @@ class AppTest(unittest.TestCase):
         self.assertEqual(args[args.index("--certfile") + 1], "/certs/client.crt")
         self.assertEqual(args[args.index("-n") + 1], "25000")
 
+    def test_custom_payload_uses_template_file(self):
+        cfg = app.parse_cfg({**BASE, "payload": '{"t":%TIMESTAMPMS%}'})
+        args = app.bench_args(cfg, 10, 0, 10)
+        self.assertEqual(args[args.index("-m") + 1], "template:///certs/payload.txt")
+        self.assertNotIn("-m", app.bench_args(app.parse_cfg(BASE), 10, 0, 10))
+        with tempfile.TemporaryDirectory() as d:
+            with open(app.write_certs(cfg, d)["payload"]) as f:
+                self.assertEqual(f.read(), '{"t":%TIMESTAMPMS%}')
+
     def test_parse_cfg_rejects_bad_input(self):
-        for bad in ({"host": "a b"}, {"port": 0}, {"total": 0}, {"mode": "x"}, {"cert": "C"}):
+        for bad in ({"host": "a b"}, {"port": 0}, {"total": 0}, {"mode": "x"}, {"cert": "C"}, {"payload": "x" * (app.MAX_PAYLOAD + 1)}):
             with self.assertRaises(app.BadRequest):
                 app.parse_cfg({**BASE, **bad})
+
+    def test_mcp_cfg_maps_args_and_rejects_bad_input(self):
+        import mcp_server
+        cfg = mcp_server._cfg(**{**BASE, "cert": "C", "key": "K"})
+        self.assertEqual((cfg["cert"], cfg["total"]), ("C", 100000))
+        with self.assertRaises(mcp_server.ToolError):
+            mcp_server._cfg(**{**BASE, "host": "a b"})
 
 
 if __name__ == "__main__":
