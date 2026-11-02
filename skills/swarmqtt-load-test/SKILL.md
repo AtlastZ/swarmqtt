@@ -5,7 +5,7 @@ description: Load test, stress test, or benchmark an MQTT or MQTTS broker (EMQX,
 
 # Load testing an MQTT broker with swarmqtt
 
-swarmqtt runs emqtt-bench worker containers (max 25,000 devices each, so each worker gets its own IP and ~64k source ports) behind a small control server. You drive it through its MCP tools or its HTTP API, ramp the load in steps, watch the numbers, and stop when the broker (or the load machine) shows its limit.
+swarmqtt runs emqtt-bench worker containers (max 25,000 devices each, to spread CPU and RAM; workers add no source ports, since every connection leaves through the Docker host's address) behind a small control server. You drive it through its MCP tools or its HTTP API, ramp the load in steps, watch the numbers, and stop when the broker (or the load machine) shows its limit.
 
 ## 1. Make sure swarmqtt is running
 
@@ -38,12 +38,14 @@ The load generator runs out of memory long before a decent broker does, and a cr
 
 Check what Docker has with `docker info --format '{{.MemTotal}} {{.NCPU}}'` (on Docker Desktop / colima this is the VM size, not the host's, and other containers already use part of it). Keep the estimate under ~70% of it. `start_load_test` refuses anything above 90% by itself, so treat that error as "this machine is too small", not a broker problem. During the run, `get_status` → `load` shows the workers' actual RAM (vs `mem_total`) and CPU in cores (vs `ncpu`): if either is near the limit, the load machine is the bottleneck and any failures at that step don't count against the broker. If it doesn't fit, tell the user the maximum this machine can do and offer options: a bigger VM, a Linux box closer to the broker, or several machines each running swarmqtt with a different `client_id_prefix` so client IDs don't collide.
 
+Source ports are the other limit. Docker on macOS (OrbStack, Docker Desktop) reopens every container connection from the Mac itself, so all workers share the Mac's 16,384 ephemeral ports (49152–65535). `get_status` → `load.max_devices` is 15,000 there and `start_load_test` refuses more; above that, use a Linux machine in the broker's network. On Linux the ceiling is about 64k connections per broker host:port.
+
 ## 4. Run it
 
 1. **`test_connection`** with the real settings and `verify_server_cert=true` if they have the CA. Fix any failure here; it is much cheaper to debug one connection than 100k. Note the connect latency as a baseline.
 2. **Smoke run**: ~100–1,000 devices. Wait until `connect_succ` reaches the target, then read `get_status` twice ~10 s apart. Any `connect_fail` or worker not `running` at this size is a config problem, not a capacity limit: stop and fix it.
 3. **Ramp**: increase in steps (e.g. 1k → 10k → 25k → 50k → 100k, or 2x per step when looking for the limit). `start_load_test` replaces the running test, so each step reconnects everything from zero; that is fine and also tests reconnect storms. At each step, wait for connections to settle, then hold for at least 1–2 minutes (a few keepalive periods) and sample `get_status` every ~15–30 s. Set `duration_sec` a bit longer than you plan to hold each step (default 600) so a forgotten or interrupted session can't leave load running; `ends_in` in `get_status` shows the seconds left.
-4. Pick a sensible `connections_per_sec`: the TLS handshake is the expensive part for the broker. Start around 500–2,000/s total and raise it only if the goal is to test connection storms.
+4. Pick a sensible `connections_per_sec`: the TLS handshake is the expensive part for the broker. Start around 500/s total (the default) and raise it only if the goal is to test connection storms. From Docker on macOS keep it at 500/s or lower: faster storms stall OrbStack's proxy and show up as `pingresp_timeout` / `keepalive_timeout` that are not the broker's fault. Worker logs are saved to `logs/` on Stop, so failures can be counted afterwards.
 
 **Stop the ramp and record the last good step when any of these happens:**
 

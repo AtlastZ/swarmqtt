@@ -172,7 +172,7 @@
         <input id="totalRange" type="range" min="1000" max="200000" step="1000" value="100000" aria-label="Concurrent devices slider" style="width:100%">
         <p class="hint" id="workersHint"></p>
         <div class="row">
-          <label>Conn/sec <input name="rate" type="number" min="1" value="2000" required></label>
+          <label>Conn/sec <input name="rate" type="number" min="1" value="500" required></label>
           <label>Keepalive (s) <input name="keepalive" type="number" min="5" value="60" required></label>
           <label>Stop after (s) <input name="duration" type="number" min="0" max="604800" value="600" required></label>
         </div>
@@ -233,6 +233,7 @@ const PER_WORKER = 25000;
 const WORKER_MEM = 575 * 2 ** 20, CONN_MEM = 107 * 2 ** 10;  // same estimate as app.py
 const GB = b => (b / 2 ** 30).toFixed(1) + ' GB';
 let memTotal = 0;
+let maxDevices = null;  // set on Docker for macOS: all workers share the Mac's source ports
 const SECRET = ['password', 'key'];  // never saved in the browser
 const fmt = n => Number(n).toLocaleString();
 
@@ -270,8 +271,10 @@ function syncTotal(from) {
   let text = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each. Needs ~${GB(need)} RAM`;
   if (memTotal) text += ` of ${GB(memTotal)} in Docker` + (need > memTotal * 0.9 ? ': too much, Start will be refused'
     : need > memTotal * 0.7 ? ': tight, the load machine may run out first' : '');
+  const overPorts = maxDevices && total > maxDevices;
+  if (overPorts) text += `. Docker on macOS shares the Mac's 16,384 source ports across all workers: Start will be refused above ${fmt(maxDevices)}`;
   $('workersHint').textContent = text;
-  $('workersHint').className = 'hint' + (memTotal && need > memTotal * 0.7 ? ' bad' : '');
+  $('workersHint').className = 'hint' + ((memTotal && need > memTotal * 0.7) || overPorts ? ' bad' : '');
 }
 
 function say(text, ok) {
@@ -341,7 +344,9 @@ async function poll() {
     const L = s.load;
     $('cMem').textContent = L.mem_total ? `${(L.mem / 2 ** 30).toFixed(1)} / ${GB(L.mem_total)}` : '-';
     $('cCpu').textContent = L.ncpu ? `${L.cpu.toFixed(1)} / ${L.ncpu}` : '-';
-    if (L.mem_total !== memTotal) { memTotal = L.mem_total; syncTotal('input'); }
+    if (L.mem_total !== memTotal || (L.max_devices ?? null) !== maxDevices) {
+      memTotal = L.mem_total; maxDevices = L.max_devices ?? null; syncTotal('input');
+    }
     const rows = Object.entries(t).sort().map(([k, v]) => `<tr><td>${k}</td><td>${fmt(v.total)}</td><td>${fmt(v.rate)}</td></tr>`);
     $('metrics').innerHTML = rows.join('') || '<tr><td colspan="3" class="sub">No data yet</td></tr>';
     $('logs').textContent = s.logs.join('\n') || '-';

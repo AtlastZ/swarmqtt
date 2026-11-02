@@ -53,7 +53,7 @@ def start_load_test(
     host: str,
     devices: int,
     port: int = 8883,
-    connections_per_sec: int = 2000,
+    connections_per_sec: int = 500,
     mode: Literal["pub", "sub", "conn"] = "pub",
     topic: str = "iot/%i/telemetry",
     publish_interval_ms: int = 10000,
@@ -74,7 +74,9 @@ def start_load_test(
     """Start a load test with `devices` concurrent simulated IoT devices (replaces any running test).
 
     Spawns one emqtt-bench worker container per 25,000 devices. Each worker needs ~575 MB plus
-    ~107 KB per TLS connection. Topic placeholders: %i = device number, %c = client ID.
+    ~107 KB per TLS connection. Workers add no source ports: with Docker on macOS (OrbStack,
+    Docker Desktop) all of them share the Mac's 16,384, so the test is refused above 15,000 devices
+    there (get_status `load.max_devices`). Topic placeholders: %i = device number, %c = client ID.
     `payload` sets custom message content (e.g. JSON) instead of `payload_bytes` random bytes; it may use
     %TIMESTAMP%, %TIMESTAMPMS%, %UNIQUE% (unique number per message, not sequential) and %RANDOM% (payload_bytes random bytes).
     The broker certificate is NOT verified during the load test.

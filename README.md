@@ -25,8 +25,13 @@ docker compose down                   # ปิด UI (ให้กด Stop ก�
    - **Custom payload** (ไม่บังคับ): ใส่ข้อความ/JSON ที่จะส่งจริงแทน random bytes ใช้ตัวแปรได้ `%TIMESTAMP%`, `%TIMESTAMPMS%`, `%UNIQUE%` (เลขไม่ซ้ำต่อข้อความ ไม่เรียงลำดับ อาจติดลบ), `%RANDOM%` (random ขนาดเท่า Payload bytes) เช่น `{"temp":24.5,"ts":%TIMESTAMPMS%,"seq":%UNIQUE%}` สูงสุด 256 KB
 5. กด **Start load test** แล้วดู connected / failed / rate / log สดๆ ส่วน **Stop** ลบ worker ทั้งหมด
 
-แต่ละ worker container รับไม่เกิน 25,000 device (มี IP ของตัวเอง ไม่ติด limit ~64k source port ต่อ IP)
-เช่น 100,000 device = 4 worker
+แต่ละ worker container รับไม่เกิน 25,000 device เช่น 100,000 device = 4 worker
+การแบ่ง worker ช่วยกระจาย CPU/RAM แต่**ไม่ได้เพิ่ม source port**: connection ทุกตัวออกจาก address ของเครื่องที่รัน Docker
+(บน Linux ได้ราว 64k port ต่อ broker host:port หนึ่งตัว)
+
+**รันบน Mac ได้ไม่เกิน ~15,000 device ต่อเครื่อง**: Docker บน macOS (OrbStack, Docker Desktop) เปิด connection ของทุก container
+ใหม่จากตัว Mac เอง ซึ่งมี ephemeral port แค่ 49152–65535 (16,384 port, ดูด้วย `sysctl net.inet.ip.portrange.first net.inet.ip.portrange.last`)
+UI จึงไม่ยอมเริ่มถ้าตั้งเกิน 15,000 บน Docker ของ Mac ถ้าต้องการมากกว่านั้นให้รัน swarmqtt บนเครื่อง Linux ที่อยู่ network เดียวกับ broker
 
 ## MCP (ให้ AI agent สั่ง load test เอง)
 
@@ -72,6 +77,10 @@ cp -r skills/swarmqtt-load-test ~/.claude/skills/     # Claude Code (ทุก�
   UI แสดง RAM ที่ต้องใช้เทียบกับที่ Docker มีตอนตั้งจำนวน device และ **ไม่ยอมเริ่ม** ถ้าเกิน 90% (กัน VM ล่มกลางทาง)
   ระหว่างรันดูการ์ด Load machine RAM/CPU ถ้าใกล้เต็ม แปลว่าคอขวดอยู่ที่เครื่องยิง ไม่ใช่ broker
   ถ้าเกินเครื่องเดียว ให้รัน UI นี้หลายเครื่อง แต่ละเครื่องรับส่วนหนึ่ง และตั้ง Client ID prefix ไม่ให้ซ้ำกัน
+- **ค่าเริ่ม Conn/sec คือ 500**: บน Mac ถ้าเปิดเร็วระดับ 2,000/s ตัว proxy ของ OrbStack ตามไม่ทัน connection ค้างไปราวหนึ่งนาที
+  แล้วโดน `pingresp_timeout` / `keepalive_timeout` ทั้งที่ broker ปกติ ค่อยเพิ่ม rate เมื่อรันจากเครื่อง Linux
+- **log ของ worker ถูกเก็บก่อนลบ**: กด Stop หรือหมดเวลา Stop after แล้ว log เต็มของทุก worker จะอยู่ที่ `logs/<เวลา>-swarmqtt-worker-N.log`
+  (UI แสดงแค่ 50 บรรทัดล่าสุด) ใช้นับ `pingresp_timeout` / error ได้ครบ
 - **ตอน load test ไม่ verify cert ของ broker** (เป็นข้อจำกัดของ emqtt-bench) CA จึงใช้แค่ตอน Test connection
 - **ตัวเลข `pub` ที่ emqtt-bench รายงานเป็น ~2 เท่าของที่ broker ได้รับจริง** ให้ดู message rate จากฝั่ง broker
 - **UI และ MCP คุม Docker ได้** (mount `docker.sock`) จึง bind แค่ `127.0.0.1` ห้ามเปิดออก network (MCP กัน DNS rebinding ด้วยการเช็ค Host/Origin ด้วย)

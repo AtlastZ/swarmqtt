@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 
@@ -38,6 +39,80 @@ class AppTest(unittest.TestCase):
                 app.start(app.parse_cfg(BASE))  # 100k devices ~13 GB, refused before touching Docker
         finally:
             app.mem_total = 0
+
+    def test_mac_docker_caps_devices_by_source_ports(self):
+        try:
+            for name in ("OrbStack", "Docker Desktop"):
+                app.docker_os = name
+                self.assertEqual(app.max_devices(), app.MAC_MAX_DEVICES)
+                app.preflight(app.MAC_MAX_DEVICES)
+                with self.assertRaisesRegex(app.BadRequest, "source ports"):
+                    app.preflight(app.MAC_MAX_DEVICES + 1)
+            app.docker_os = "Ubuntu 24.04.3 LTS"
+            self.assertIsNone(app.max_devices())
+            app.preflight(app.MAC_MAX_DEVICES + 1)
+        finally:
+            app.docker_os = ""
+
+    def test_stop_saves_worker_logs_before_removing(self):
+        events = []
+
+        broken = set()
+
+        class Worker:
+            def __init__(self, name):
+                self.name = name
+
+            def logs(self):
+                events.append(("logs", self.name))
+                if self.name in broken:
+                    raise RuntimeError("log stream gone")
+                return f"{self.name} done\n".encode()
+
+            def remove(self, force):
+                events.append(("remove", self.name))
+
+        class Containers:
+            def list(self, **kw):
+                return [Worker("swarmqtt-worker-0"), Worker("swarmqtt-worker-1")]
+
+        class Docker:
+            containers = Containers()
+
+        saved_dk, saved_dir = app.dk, app.LOGS_DIR
+        with tempfile.TemporaryDirectory() as d:
+            app.dk, app.LOGS_DIR = Docker(), d
+            try:
+                app.stop()
+                files = sorted(os.listdir(d))
+                self.assertEqual(len(files), 2)
+                self.assertTrue(files[0].endswith("-swarmqtt-worker-0.log"))
+                with open(os.path.join(d, files[0])) as f:
+                    self.assertEqual(f.read(), "swarmqtt-worker-0 done\n")
+                self.assertLess(events.index(("logs", "swarmqtt-worker-0")), events.index(("remove", "swarmqtt-worker-0")))
+
+                with tempfile.TemporaryDirectory() as d2:
+                    app.LOGS_DIR = d2
+                    broken.add("swarmqtt-worker-0")
+                    events.clear()
+                    app.stop()
+                    self.assertEqual([f.split("-", 2)[2] for f in os.listdir(d2)], ["swarmqtt-worker-1.log"])
+                    self.assertIn(("remove", "swarmqtt-worker-0"), events)
+                    broken.clear()
+
+                events.clear()
+                app.LOGS_DIR = os.path.join(d, "missing")
+                app.stop()
+                self.assertIn(("remove", "swarmqtt-worker-1"), events)
+            finally:
+                app.dk, app.LOGS_DIR = saved_dk, saved_dir
+
+    def test_default_connection_rate_is_gentle(self):
+        import inspect
+        import mcp_server
+        self.assertEqual(inspect.signature(mcp_server.start_load_test).parameters["connections_per_sec"].default, 500)
+        with open(os.path.join(os.path.dirname(app.__file__), "index.html")) as f:
+            self.assertIn('name="rate" type="number" min="1" value="500"', f.read())
 
     def test_duration_defaults_to_unlimited(self):
         self.assertEqual(app.parse_cfg(BASE)["duration"], 0)
