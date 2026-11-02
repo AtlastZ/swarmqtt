@@ -15,9 +15,15 @@ import paho.mqtt.client as mqtt
 BENCH_IMAGE = os.environ.get("BENCH_IMAGE", "emqx/emqtt-bench:latest")
 CERTS_VOLUME = os.environ.get("CERTS_VOLUME", "swarmqtt-certs")
 CERTS_DIR = "/certs"
+LOGS_DIR = os.environ.get("LOGS_DIR", "/logs")
 LABEL = "swarmqtt"
-# Each worker container has its own IP, so it gets its own ~64k source ports to the broker.
+# Splitting across workers spreads CPU and RAM. It adds no source ports: connections leave through
+# the Docker host's address, about 64k ports per broker host:port on Linux.
 PER_WORKER = 25000
+# Docker on macOS (OrbStack, Docker Desktop) reopens every container connection from the Mac itself,
+# whose ephemeral range 49152-65535 holds only 16,384 ports for all workers together.
+MAC_DOCKER = ("OrbStack", "Docker Desktop")
+MAC_MAX_DEVICES = 15000
 MAX_TOTAL = 1_000_000
 MAX_PAYLOAD = 256 * 1024
 # measured with emqtt-bench + TLS; plain MQTT uses less, so this errs on the safe side
@@ -29,6 +35,7 @@ HOST_RE = re.compile(r"^[A-Za-z0-9.\-:\[\],]+$")
 
 dk = None  # docker client, set in main()
 mem_total = ncpu = 0  # Docker's RAM (bytes) and CPUs, set in main()
+docker_os = ""  # Docker's OperatingSystem, set in main()
 lock = threading.Lock()
 stats = {}  # worker name -> {metric: {"total": int, "rate": float}}
 usage = {}  # worker name -> {"mem": bytes, "cpu": cores}
@@ -194,6 +201,21 @@ def estimate_mem(total):
     return math.ceil(total / PER_WORKER) * WORKER_MEM + total * CONN_MEM
 
 
+def max_devices():
+    return MAC_MAX_DEVICES if any(name in docker_os for name in MAC_DOCKER) else None
+
+
+def preflight(total):
+    cap = max_devices()
+    if cap and total > cap:
+        raise BadRequest(f"{total:,} devices is more than Docker on macOS ({docker_os}) can open: all workers share "
+                         f"the Mac's 16,384 source ports, so keep it at {cap:,} or less, or run swarmqtt on a Linux machine")
+    need = estimate_mem(total)
+    if mem_total and need > mem_total * MAX_MEM_SHARE:
+        raise BadRequest(f"{total:,} devices need ~{need / 2**30:.1f} GB RAM but Docker has "
+                         f"{mem_total / 2**30:.1f} GB: lower the devices, give Docker more RAM, or split across machines")
+
+
 def workers():
     return dk.containers.list(all=True, filters={"label": LABEL})
 
@@ -243,12 +265,31 @@ def attach(container):
         threading.Thread(target=target, args=(container,), daemon=True).start()
 
 
+def save_logs(containers):
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    saved = 0
+    for c in containers:
+        try:
+            data = c.logs()
+            with open(os.path.join(LOGS_DIR, f"{stamp}-{c.name}.log"), "wb") as f:
+                f.write(data)
+            saved += 1
+        except Exception as e:
+            with lock:
+                logs.append(f"[{c.name}] log not saved: {e}")
+    if saved:
+        with lock:
+            logs.append(f"Worker logs saved as logs/{stamp}-*.log")
+
+
 def stop():
     with lock:
         if run["timer"]:
             run["timer"].cancel()
         run.update(timer=None, ends_at=None)
-    for c in workers():
+    ws = workers()
+    save_logs(ws)
+    for c in ws:
         c.remove(force=True)
     with lock:
         stats.clear()
@@ -264,10 +305,7 @@ def expire(run_id):
 
 def start(cfg):
     import docker
-    need = estimate_mem(cfg["total"])
-    if mem_total and need > mem_total * MAX_MEM_SHARE:
-        raise BadRequest(f"{cfg['total']:,} devices need ~{need / 2**30:.1f} GB RAM but Docker has "
-                         f"{mem_total / 2**30:.1f} GB: lower the devices, give Docker more RAM, or split across machines")
+    preflight(cfg["total"])
     stop()
     with lock:
         logs.clear()
@@ -305,7 +343,8 @@ def status():
                 t["total"] += v["total"]
                 t["rate"] = round(t["rate"] + v["rate"], 2)
         load = {"mem": sum(u["mem"] for u in usage.values()), "mem_total": mem_total,
-                "cpu": round(sum(u["cpu"] for u in usage.values()), 2), "ncpu": ncpu}
+                "cpu": round(sum(u["cpu"] for u in usage.values()), 2), "ncpu": ncpu,
+                "max_devices": max_devices(), "docker_os": docker_os}
         return {"running": any(w["status"] == "running" for w in ws), "workers": ws,
                 "totals": totals, "load": load,
                 # seconds left, not a timestamp: the Docker VM clock can drift from the viewer's
@@ -354,11 +393,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global dk, mem_total, ncpu
+    global dk, mem_total, ncpu, docker_os
     import docker
     dk = docker.from_env()
     info = dk.info()
-    mem_total, ncpu = info["MemTotal"], info["NCPU"]
+    mem_total, ncpu, docker_os = info["MemTotal"], info["NCPU"], info.get("OperatingSystem", "")
     for c in workers():  # reattach after a web restart (the duration timer is not restored)
         attach(c)
     import mcp_server

@@ -9,6 +9,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - certs:/certs
+      - ./logs:/logs                # worker logs, saved on Stop before the workers are removed
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
