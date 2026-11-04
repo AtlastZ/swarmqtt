@@ -68,6 +68,7 @@
   textarea { font: 12px/1.4 ui-monospace, monospace; min-height: 78px; resize: vertical; }
   input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .row { display: flex; gap: 12px; } .row > * { flex: 1; min-width: 0; }
+  .pair { display: flex; align-items: center; gap: 6px; margin-top: 4px; } .pair > input { flex: 1; min-width: 0; }
   .check { display: flex; align-items: center; gap: 8px; color: var(--text); }
   .check input { width: auto; margin: 0; }
   .hint { color: var(--muted); font-size: 12px; margin: -6px 0 12px; }
@@ -207,9 +208,14 @@
         <div class="row">
           <label>Conn/sec <input name="rate" type="number" min="1" value="500" required></label>
           <label>Keepalive (s) <input name="keepalive" type="number" min="5" value="60" required></label>
-          <label>Stop after (s) <input name="duration" type="number" min="0" max="604800" value="600" required></label>
         </div>
-        <p class="hint">Stop after 0 = run until you press Stop</p>
+        <label>Stop after
+          <span class="pair">
+            <input name="duration_m" type="number" min="0" max="10080" value="10" required aria-label="Stop after minutes"> min
+            <input name="duration_s" type="number" min="0" max="59" value="0" required aria-label="Stop after seconds"> s
+          </span>
+        </label>
+        <p class="hint">Stop after 0 min 0 s = run until you press Stop</p>
         <label>Mode
           <select name="mode">
             <option value="pub">Publish (devices send telemetry)</option>
@@ -302,6 +308,7 @@ function formData() {
     if (!el.name) continue;
     d[el.name] = el.type === 'checkbox' ? el.checked : el.value;
   }
+  d.duration = (+d.duration_m || 0) * 60 + (+d.duration_s || 0);
   return d;
 }
 
