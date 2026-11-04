@@ -49,6 +49,12 @@ SAMPLE_FIELDS = ["t", "devices", "connected", "failed", "conn_rate", "pub_rate",
                  "mem", "mem_total", "cpu", "ncpu"]
 SECRET_FIELDS = ("password", "key", "cert", "ca")  # never written to run records
 HOST_RE = re.compile(r"^[A-Za-z0-9.\-:\[\],]+$")
+NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+STEP_RE = re.compile(r"^\d+(?:\.\d+)?$")
+PLACEHOLDER_SPECS = {
+    "%RANGE:": (NUM_RE, NUM_RE),
+    "%WALK:": (NUM_RE, NUM_RE, STEP_RE),
+}
 
 dk = None  # docker client, set in main()
 mem_total = ncpu = 0  # Docker's RAM (bytes) and CPUs, set in main()
@@ -139,6 +145,36 @@ def parse_cfg(raw):
         raise BadRequest("tls_version must be empty, tlsv1.2 or tlsv1.3")
     if len(cfg["payload"].encode()) > MAX_PAYLOAD:
         raise BadRequest(f"payload must be at most {MAX_PAYLOAD} bytes")
+    payload = cfg["payload"]
+    has_range_walk = False
+    i = 0
+    n = len(payload)
+    while i < n:
+        if payload[i] == "%":
+            known = next((p for p in ("%TIMESTAMPMS%", "%TIMESTAMPUS%", "%TIMESTAMPNS%", "%TIMESTAMP%", "%UNIQUE%", "%RANDOM%")
+                          if payload.startswith(p, i)), None)
+            if known:
+                i += len(known)
+                continue
+            prefix = next((p for p in PLACEHOLDER_SPECS if payload.startswith(p, i)), None)
+            if prefix:
+                next_pct = payload.find("%", i + 1)
+                text = (payload[i:next_pct + 1] if next_pct != -1 else payload[i:])[:40]
+                if next_pct == -1:
+                    raise BadRequest(f"bad payload placeholder '{text}' (malformed)")
+                candidate = payload[i:next_pct + 1]
+                args = candidate[len(prefix):-1].split(":")
+                expected = PLACEHOLDER_SPECS[prefix]
+                if len(args) != len(expected) or not all(r.match(a) for r, a in zip(expected, args)):
+                    raise BadRequest(f"bad payload placeholder '{text}' (malformed)")
+                if float(args[0]) > float(args[1]):
+                    raise BadRequest(f"bad payload placeholder '{candidate}' (min > max)")
+                has_range_walk = True
+                i = next_pct + 1
+                continue
+        i += 1
+    if has_range_walk and BENCH_IMAGE.startswith("emqx/emqtt-bench"):
+        raise BadRequest("RANGE and WALK placeholders need the patched emqtt-bench image; set BENCH_IMAGE in .env")
     if bool(cfg["cert"]) != bool(cfg["key"]):
         raise BadRequest("client certificate and client key must be given together")
     if cfg["mode"] != "conn" and (not cfg["topic"] or any(c.isspace() for c in cfg["topic"])):
