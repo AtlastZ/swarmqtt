@@ -21,7 +21,7 @@ docker compose down                   # ปิด UI (ให้กด Stop ก�
 2. TLS: เปิด MQTTS, วางหรืออัปโหลด CA / client cert / client key (PEM)
 3. กด **Test connection**: ต่อ 1 connection ด้วย paho-mqtt และ verify cert จริงถ้าติ๊ก Verify
 4. ตั้ง **Concurrent devices**, connections/sec, mode (publish / subscribe / connect only), topic, ความถี่, payload, QoS
-   - **Stop after (s)**: หยุดเองเมื่อครบเวลา (ค่าเริ่ม 600, ใส่ 0 = รันจนกด Stop) กันลืมปล่อย load ค้าง
+   - **Stop after (min, s)**: หยุดเองเมื่อครบเวลา ใส่เป็นนาทีกับวินาที (ค่าเริ่ม 10 นาที, ใส่ 0 นาที 0 วินาที = รันจนกด Stop) กันลืมปล่อย load ค้าง
    - **Custom payload** (ไม่บังคับ): ใส่ข้อความ/JSON ที่จะส่งจริงแทน random bytes ใช้ตัวแปรได้ `%TIMESTAMP%`, `%TIMESTAMPMS%`, `%UNIQUE%` (เลขไม่ซ้ำต่อข้อความ ไม่เรียงลำดับ อาจติดลบ), `%RANDOM%` (random ขนาดเท่า Payload bytes), `%RANGE:<min>:<max>%` (สุ่มค่าใหม่ในขอบเขตทุกข้อความ), `%WALK:<min>:<max>:<step>%` (random walk แยกค่าต่อ device ขยับค่าแบบสุ่มไม่เกิน step ต่อข้อความ) ทศนิยมตามตัวเลขที่ละเอียดสุดใน placeholder (`40:60` เป็นจำนวนเต็ม, `20.0:30.0` ทศนิยมหนึ่งตำแหน่ง) หากพิมพ์ผิดจะถูกปฏิเสธ เช่น `{"temp":%WALK:20.0:30.0:0.2%,"hum":%RANGE:40:60%,"ts":%TIMESTAMPMS%}` สูงสุด 256 KB (%RANGE และ %WALK ต้องใช้ worker image ที่ build จาก emqtt-bench ตัวที่แพตช์แล้ว ตั้งผ่าน `BENCH_IMAGE=<image>` ใน `.env` ของทุกเครื่อง ทั้ง controller และ peers หากใช้ stock image จะถูกปฏิเสธ)
 5. กด **Start load test** แล้วดู connected / failed / rate / กราฟ / log สดๆ ส่วน **Stop** ลบ worker ทั้งหมด
 
