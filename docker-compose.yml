@@ -9,6 +9,7 @@ services:
       # peer API (only with PEER_TOKEN); set PEER_BIND=0.0.0.0 on machines a controller drives
       - "${PEER_BIND:-127.0.0.1}:${PEER_PORT:-8082}:8082"
     environment:
+      BENCH_IMAGE: ${BENCH_IMAGE:-emqx/emqtt-bench:latest}
       PEERS: ${PEERS:-}             # controller: other swarmqtt peer APIs, comma-separated
       PEER_TOKEN: ${PEER_TOKEN:-}   # same secret on the controller and every peer
     volumes:

@@ -31,6 +31,46 @@ class AppTest(unittest.TestCase):
             with open(app.write_certs(cfg, d)["payload"]) as f:
                 self.assertEqual(f.read(), '{"t":%TIMESTAMPMS%}')
 
+    def test_payload_range_walk_placeholders(self):
+        raw_payload = '{"r":%RANGE:1:10%,"w":%WALK:20.0:30.0:0.2%}'
+        with tempfile.TemporaryDirectory() as d:
+            paths = app.write_certs({**BASE, "payload": raw_payload, "cert": "", "key": "", "ca": ""}, d)
+            with open(paths["payload"]) as f:
+                self.assertEqual(f.read(), raw_payload)
+
+        for bad in ("%RANGE:a:b%", "%WALK:20:30%", "%WALK:0:10:-1%"):
+            with self.assertRaises(app.BadRequest) as ctx:
+                app.parse_cfg({**BASE, "payload": bad})
+            self.assertIn(bad, str(ctx.exception))
+            self.assertIn("(malformed)", str(ctx.exception))
+
+        with self.assertRaises(app.BadRequest) as ctx:
+            app.parse_cfg({**BASE, "payload": '{"r":%RANGE:1:10,"ts":%TIMESTAMPMS%}'})
+        self.assertIn('%RANGE:1:10,"ts":%', str(ctx.exception))
+        self.assertIn("(malformed)", str(ctx.exception))
+
+        for bad in ("%RANGE:30:20%", "%WALK:30:20:1%"):
+            with self.assertRaises(app.BadRequest) as ctx:
+                app.parse_cfg({**BASE, "payload": bad})
+            self.assertIn(bad, str(ctx.exception))
+            self.assertIn("(min > max)", str(ctx.exception))
+
+        saved_image = app.BENCH_IMAGE
+        try:
+            app.BENCH_IMAGE = "emqtt-bench:range-walk"
+            for p in ('{"r":%RANGE:9.5:10%}', '%UNIQUE%%RANGE:1:5%'):
+                cfg = app.parse_cfg({**BASE, "payload": p})
+                args = app.bench_args(cfg, 10, 0, 10)
+                self.assertEqual(args[args.index("-m") + 1], "template:///certs/payload.txt")
+
+            app.BENCH_IMAGE = "emqx/emqtt-bench:latest"
+            with self.assertRaises(app.BadRequest):
+                app.parse_cfg({**BASE, "payload": '%RANGE:1:10%'})
+            cfg_plain = app.parse_cfg({**BASE, "payload": '{"t":%TIMESTAMPMS%}'})
+            self.assertEqual(cfg_plain["payload"], '{"t":%TIMESTAMPMS%}')
+        finally:
+            app.BENCH_IMAGE = saved_image
+
     def test_estimate_mem_and_refuse_when_too_big(self):
         self.assertEqual(app.estimate_mem(100000), 4 * app.WORKER_MEM + 100000 * app.CONN_MEM)
         self.assertLess(app.estimate_mem(100000, tls=False), app.estimate_mem(100000))

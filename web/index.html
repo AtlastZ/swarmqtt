@@ -227,7 +227,7 @@
         <label>Custom payload (optional, publish mode)
           <textarea name="payload" placeholder='{"device":"sensor","temp":24.5,"ts":%TIMESTAMPMS%,"seq":%UNIQUE%}'></textarea>
         </label>
-        <p class="hint">Sent as-is instead of random bytes. Variables: <code>%TIMESTAMP%</code> <code>%TIMESTAMPMS%</code> <code>%UNIQUE%</code> (unique number, not sequential) <code>%RANDOM%</code> (Payload bytes of random data). Empty = random bytes of Payload size.</p>
+        <p class="hint">Sent as-is instead of random bytes. Variables: <code>%TIMESTAMP%</code> <code>%TIMESTAMPMS%</code> <code>%UNIQUE%</code> (unique number, not sequential) <code>%RANDOM%</code> (Payload bytes of random data) <code>%RANGE:&lt;min&gt;:&lt;max&gt;%</code> (new random value in range on every message) <code>%WALK:&lt;min&gt;:&lt;max&gt;:&lt;step&gt;%</code> (random walk, own value per device, moves a random amount of at most step per message). Decimals follow the most precise number written (<code>40:60</code> integers, <code>20.0:30.0</code> one decimal); typos are refused. Empty = random bytes of Payload size.</p>
       </fieldset>
     </div>
 
