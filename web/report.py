@@ -34,11 +34,11 @@ def headline(r):
     good = [s for s in steps if s["ok"]]
     bad = next((s for s in steps if not s["ok"]), None)
     if cfg.get("steps"):
-        text = f"Held {good[-1]['devices']:,} devices." if good else "No ramp step held."
+        text = f"Held {max(s['devices'] for s in good):,} devices." if good else "No ramp step held."
         if bad:
             text += f" At {bad['devices']:,} devices: {bad['reason']}."
         elif r["status"] == "done":
-            text += f" Every step passed, so the limit is above {steps[-1]['devices']:,}."
+            text += f" Every step passed, so the limit is above {max(s['devices'] for s in steps):,}."
     else:
         s = steps[0]
         text = (f"{s['connected']:,} of {s['devices']:,} devices connected, {s['failed']:,} failed, "
