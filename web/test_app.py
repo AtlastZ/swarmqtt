@@ -220,6 +220,45 @@ class AppTest(unittest.TestCase):
         with self.assertRaises(mcp_server.ToolError):
             mcp_server._cfg(**{**BASE, "host": "a b"})
 
+    def test_launch_uses_bench_entrypoint(self):
+        runs = []
+
+        class FakeImages:
+            def get(self, name):
+                return None
+
+        class FakeContainers:
+            def run(self, *args, **kwargs):
+                runs.append((args, kwargs))
+                return object()
+
+        class FakeDocker:
+            images = FakeImages()
+            containers = FakeContainers()
+
+        saved_dk = app.dk
+        saved_certs = app.CERTS_DIR
+        saved_attach = app.attach
+        saved_remove = app.remove_workers
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app.dk = FakeDocker()
+                app.CERTS_DIR = d
+                app.attach = lambda c: None
+                app.remove_workers = lambda: None
+                cfg = app.parse_cfg(BASE)
+                app.launch(cfg, 50000, 0, 0, {})
+                self.assertTrue(runs)
+                for args, kwargs in runs:
+                    self.assertEqual(args[0], app.BENCH_IMAGE)
+                    self.assertEqual(kwargs.get("entrypoint"), ["/emqtt_bench/bin/emqtt_bench"])
+                    self.assertEqual(args[1][0], "pub")
+        finally:
+            app.dk = saved_dk
+            app.CERTS_DIR = saved_certs
+            app.attach = saved_attach
+            app.remove_workers = saved_remove
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,7 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-BENCH_IMAGE = os.environ.get("BENCH_IMAGE", "emqx/emqtt-bench:latest")
+BENCH_IMAGE = os.environ.get("BENCH_IMAGE", "swarmqtt:latest")
+BENCH_ENTRYPOINT = ["/emqtt_bench/bin/emqtt_bench"]
 CERTS_VOLUME = os.environ.get("CERTS_VOLUME", "swarmqtt-certs")
 CERTS_DIR = "/certs"
 LOGS_DIR = os.environ.get("LOGS_DIR", "/logs")
@@ -415,6 +416,7 @@ def launch(cfg, total, offset, subscribers, labels):
     for name, args in jobs:
         c = dk.containers.run(
             BENCH_IMAGE, args, name=name, labels={LABEL: "worker", **labels}, detach=True,
+            entrypoint=BENCH_ENTRYPOINT,
             volumes={CERTS_VOLUME: {"bind": CERTS_DIR, "mode": "ro"}},
             ulimits=[docker.types.Ulimit(name="nofile", soft=1048576, hard=1048576)],
             sysctls={"net.ipv4.ip_local_port_range": "1024 65535"},
