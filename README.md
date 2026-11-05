@@ -11,10 +11,28 @@ Web UI สำหรับ load test MQTT / MQTTS broker จำลอง IoT devi
 
 ## ใช้งาน
 
+ไม่ต้อง clone repo: pull image จาก ghcr แล้วรันได้เลย (มี amd64 และ arm64)
+
 ```sh
-docker compose up -d --build          # เปิด http://localhost:8080
-UI_PORT=18080 docker compose up -d    # ถ้า port 8080 ไม่ว่าง
-docker compose down                   # ปิด UI (ให้กด Stop ก่อนเพื่อลบ worker)
+docker run -d --name swarmqtt --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 -p 127.0.0.1:8081:8081 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v swarmqtt-certs:/certs -v swarmqtt-data:/data \
+  --add-host host.docker.internal:host-gateway \
+  ghcr.io/kit09k/swarmqtt:latest       # เปิด http://localhost:8080
+docker pull ghcr.io/kit09k/swarmqtt:latest && docker rm -f swarmqtt   # อัปเดต แล้วรันคำสั่งบนใหม่
+docker rm -f swarmqtt                  # ปิด UI (ให้กด Stop ก่อนเพื่อลบ worker)
+```
+
+worker ใช้ image เดียวกับที่ UI รันอยู่โดยอัตโนมัติ ไม่ต้องตั้ง env
+
+ถ้า clone repo มาแล้วใช้ compose แทนก็ได้ (log ของ worker จะอยู่ที่ `./logs`):
+
+```sh
+docker compose pull && docker compose up -d   # เปิด http://localhost:8080
+UI_PORT=18080 docker compose up -d            # ถ้า port 8080 ไม่ว่าง
+docker compose up -d --build                  # build เองจาก source แทน pull
+docker compose down                           # ปิด UI (ให้กด Stop ก่อนเพื่อลบ worker)
 ```
 
 1. กรอก Broker (host, port, MQTT version, user/pass) ถ้า broker รันบนเครื่องนี้ ให้ใช้ `host.docker.internal`
@@ -24,7 +42,7 @@ docker compose down                   # ปิด UI (ให้กด Stop ก�
    - **Connect retries**: ตั้งให้ device ที่ต่อไม่สำเร็จลองใหม่ N ครั้ง (0-10, ค่าเริ่ม 0) ก่อนนับเป็น connect_fail (การ retry นับใน connect_retried)
    - **Publish together**: ให้แต่ละ worker container รอจนเริ่มเชื่อมต่อครบทุก client ก่อน แล้วทุก client ใน worker นั้นจึงเริ่ม publish พร้อมกัน (แยกกันทำในแต่ละ worker container ไม่ได้ sync ข้าม worker หรือข้ามเครื่อง)
    - **Stop after (min, s)**: หยุดเองเมื่อครบเวลา ใส่เป็นนาทีกับวินาที (ค่าเริ่ม 10 นาที, ใส่ 0 นาที 0 วินาที = รันจนกด Stop) กันลืมปล่อย load ค้าง
-   - **Custom payload** (ไม่บังคับ): ใส่ข้อความ/JSON ที่จะส่งจริงแทน random bytes ใช้ตัวแปรได้ `%TIMESTAMP%`, `%TIMESTAMPMS%`, `%UNIQUE%` (เลขไม่ซ้ำต่อข้อความ ไม่เรียงลำดับ อาจติดลบ), `%RANDOM%` (random ขนาดเท่า Payload bytes), `%RANGE:<min>:<max>%` (สุ่มค่าใหม่ในขอบเขตทุกข้อความ), `%WALK:<min>:<max>:<step>%` (random walk แยกค่าต่อ device ขยับค่าแบบสุ่มไม่เกิน step ต่อข้อความ) ทศนิยมตามตัวเลขที่ละเอียดสุดใน placeholder (`40:60` เป็นจำนวนเต็ม, `20.0:30.0` ทศนิยมหนึ่งตำแหน่ง) หากพิมพ์ผิดจะถูกปฏิเสธ เช่น `{"temp":%WALK:20.0:30.0:0.2%,"hum":%RANGE:40:60%,"ts":%TIMESTAMPMS%}` สูงสุด 256 KB (image ของ swarmqtt มี emqtt-bench ตัวที่แพตช์แล้วอยู่ในตัวและใช้รัน worker ด้วย แค่ `docker compose up -d --build` ก็ใช้ได้ทุกเครื่อง ทั้ง controller และ peers build ครั้งแรกนานขึ้นไม่กี่นาทีและต้องต่อ HTTPS ไป github.com กับ ghcr.io ได้ ส่วน `BENCH_IMAGE` ใน `.env` ไม่บังคับ ใช้ override worker image เท่านั้น ถ้าใช้ stock `emqx/emqtt-bench:latest` จะไม่รับ %RANGE/%WALK)
+   - **Custom payload** (ไม่บังคับ): ใส่ข้อความ/JSON ที่จะส่งจริงแทน random bytes ใช้ตัวแปรได้ `%TIMESTAMP%`, `%TIMESTAMPMS%`, `%UNIQUE%` (เลขไม่ซ้ำต่อข้อความ ไม่เรียงลำดับ อาจติดลบ), `%RANDOM%` (random ขนาดเท่า Payload bytes), `%RANGE:<min>:<max>%` (สุ่มค่าใหม่ในขอบเขตทุกข้อความ), `%WALK:<min>:<max>:<step>%` (random walk แยกค่าต่อ device ขยับค่าแบบสุ่มไม่เกิน step ต่อข้อความ) ทศนิยมตามตัวเลขที่ละเอียดสุดใน placeholder (`40:60` เป็นจำนวนเต็ม, `20.0:30.0` ทศนิยมหนึ่งตำแหน่ง) หากพิมพ์ผิดจะถูกปฏิเสธ เช่น `{"temp":%WALK:20.0:30.0:0.2%,"hum":%RANGE:40:60%,"ts":%TIMESTAMPMS%}` สูงสุด 256 KB (image ของ swarmqtt มี emqtt-bench ตัวที่แพตช์แล้วอยู่ในตัวและใช้รัน worker ด้วย จึงใช้ได้ทุกเครื่องทั้ง controller และ peers ส่วน `BENCH_IMAGE` ไม่บังคับ ใช้ override worker image เท่านั้น ถ้าใช้ stock `emqx/emqtt-bench:latest` จะไม่รับ %RANGE/%WALK)
 5. กด **Start load test** แล้วดู connected / failed / rate / กราฟ / log สดๆ ส่วน **Stop** ลบ worker ทั้งหมด
 
 ### หาเพดานของ broker (ramp อัตโนมัติ)
@@ -51,11 +69,14 @@ docker compose down                   # ปิด UI (ให้กด Stop ก�
 
 ```sh
 # บนแต่ละ peer (เปิด peer API ให้เครื่องอื่นเรียกได้ ต้องมี token)
-PEER_TOKEN=รหัสยาวๆ PEER_BIND=0.0.0.0 docker compose up -d --build
+PEER_TOKEN=รหัสยาวๆ PEER_BIND=0.0.0.0 docker compose up -d
 
 # บน controller
-PEER_TOKEN=รหัสยาวๆ PEERS=http://10.0.0.2:8082,http://10.0.0.3:8082 docker compose up -d --build
+PEER_TOKEN=รหัสยาวๆ PEERS=http://10.0.0.2:8082,http://10.0.0.3:8082 docker compose up -d
 ```
+
+ถ้าใช้ `docker run` บน peer ให้เพิ่ม `-p 0.0.0.0:8082:8082 -e PEER_TOKEN=รหัสยาวๆ` ส่วน controller เพิ่ม `-e PEER_TOKEN=รหัสยาวๆ -e PEERS=http://10.0.0.2:8082`
+สร้าง token ได้ด้วย `openssl rand -hex 24` ทุกเครื่องต้องใช้ค่าเดียวกัน
 
 controller แบ่ง device และ Conn/sec เท่าๆ กัน (เลข client ไม่ซ้ำกัน, rate อย่างน้อย 1 ต่อเครื่อง) สั่ง start/stop ทุกเครื่อง และรวมยอด/RAM/CPU ให้ในหน้าเดียว
 ramp ใช้ได้ตามปกติ peer จะหยุดเองตามเวลาแม้ controller ดับ ส่วน latency subscriber รันที่ controller เท่านั้น

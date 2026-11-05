@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import socket
 import ssl
 import tempfile
 import threading
@@ -18,7 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
 
-BENCH_IMAGE = os.environ.get("BENCH_IMAGE", "swarmqtt:latest")
+DEFAULT_BENCH_IMAGE = "swarmqtt:latest"
+BENCH_IMAGE = os.environ.get("BENCH_IMAGE") or DEFAULT_BENCH_IMAGE
 BENCH_ENTRYPOINT = ["/emqtt_bench/bin/emqtt_bench"]
 CERTS_VOLUME = os.environ.get("CERTS_VOLUME", "swarmqtt-certs")
 CERTS_DIR = "/certs"
@@ -794,10 +796,23 @@ class PeerHandler(Handler):
             self._send(404, {"error": "not found"})
 
 
+def own_image():
+    try:
+        return dk.containers.get(socket.gethostname()).attrs["Config"]["Image"]
+    except Exception:
+        return None
+
+
+def resolve_bench_image():
+    return os.environ.get("BENCH_IMAGE") or own_image() or DEFAULT_BENCH_IMAGE
+
+
 def main():
-    global dk, mem_total, ncpu, docker_os, current
+    global dk, mem_total, ncpu, docker_os, current, BENCH_IMAGE
     import docker
     dk = docker.from_env()
+    BENCH_IMAGE = resolve_bench_image()
+    print(f"Workers use image {BENCH_IMAGE}")
     info = dk.info()
     mem_total, ncpu, docker_os = info["MemTotal"], info["NCPU"], info.get("OperatingSystem", "")
     left = workers()
