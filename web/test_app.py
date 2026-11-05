@@ -392,6 +392,35 @@ class AppTest(unittest.TestCase):
             app.attach = saved_attach
             app.remove_workers = saved_remove
 
+    def test_workers_default_to_the_image_the_web_runs_from(self):
+        class Container:
+            attrs = {"Config": {"Image": "ghcr.io/kit09k/swarmqtt:latest"}}
+
+        class Containers:
+            def get(self, name):
+                if name != "abc123":
+                    raise RuntimeError("no such container")
+                return Container()
+
+        class Docker:
+            containers = Containers()
+
+        saved_dk = app.dk
+        try:
+            app.dk = Docker()
+            with unittest.mock.patch("socket.gethostname", return_value="abc123"):
+                self.assertEqual(app.own_image(), "ghcr.io/kit09k/swarmqtt:latest")
+                with unittest.mock.patch.dict(os.environ, {"BENCH_IMAGE": ""}):
+                    self.assertEqual(app.resolve_bench_image(), "ghcr.io/kit09k/swarmqtt:latest")
+                with unittest.mock.patch.dict(os.environ, {"BENCH_IMAGE": "emqx/emqtt-bench:latest"}):
+                    self.assertEqual(app.resolve_bench_image(), "emqx/emqtt-bench:latest")
+            with unittest.mock.patch("socket.gethostname", return_value="not-a-container"):
+                self.assertIsNone(app.own_image())
+                with unittest.mock.patch.dict(os.environ, {"BENCH_IMAGE": ""}):
+                    self.assertEqual(app.resolve_bench_image(), "swarmqtt:latest")
+        finally:
+            app.dk = saved_dk
+
 
 if __name__ == "__main__":
     unittest.main()
