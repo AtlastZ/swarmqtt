@@ -31,10 +31,25 @@ LABEL = "swarmqtt"
 # Splitting across workers spreads CPU and RAM. It adds no source ports: connections leave through
 # the Docker host's address, about 64k ports per broker host:port on Linux.
 PER_WORKER = 25000
+
+
+def _env_int(name, default):
+    v = os.environ.get(name, "")
+    if not v:
+        return default
+    try:
+        n = int(v)
+        if n > 0:
+            return n
+    except ValueError:
+        pass
+    raise SystemExit(f"{name} must be a positive integer, got {v!r}")
+
+
 # Docker on macOS (OrbStack, Docker Desktop) reopens every container connection from the Mac itself,
 # whose ephemeral range 49152-65535 holds only 16,384 ports for all workers together.
 MAC_DOCKER = ("OrbStack", "Docker Desktop")
-MAC_MAX_DEVICES = 15000
+MAC_MAX_DEVICES = _env_int("MAC_MAX_DEVICES", 15000)
 MAX_TOTAL = 1_000_000
 MAX_PAYLOAD = 256 * 1024
 # measured with emqtt-bench: per TLS connection ~107 KB; plain MQTT ~40 KB (600 conns), rounded up
@@ -86,7 +101,7 @@ def _steps(v):
     if isinstance(v, str):
         v = [x for x in re.split(r"[,\s]+", v) if x]
     try:
-        steps = sorted({int(x) for x in v or []})
+        steps = [int(x) for x in v or []]
     except (TypeError, ValueError):
         raise BadRequest("ramp steps must be device counts, e.g. 1000,10000,50000")
     if len(steps) > 20 or any(not 1 <= n <= MAX_TOTAL for n in steps):
@@ -113,11 +128,13 @@ def parse_cfg(raw):
         "cert": str(raw.get("cert", "")).strip(),
         "key": str(raw.get("key", "")).strip(),
         "mode": str(raw.get("mode", "pub")),
+        "wait_publish": bool(raw.get("wait_publish")),
         "topic": str(raw.get("topic", "iot/%i/telemetry")).strip(),
         "qos": _int(raw, "qos", 0, 2),
         "total": _int(raw, "total", 1, MAX_TOTAL),
         "rate": _int(raw, "rate", 1, 100_000),
         "keepalive": _int(raw, "keepalive", 5, 3600),
+        "retries": _int(raw, "retries", 0, 10, 0),
         "interval": _int(raw, "interval", 1, 3_600_000),
         "size": _int(raw, "size", 1, 1_048_576),
         "payload": str(raw.get("payload", "")),
@@ -135,7 +152,7 @@ def parse_cfg(raw):
     if not 0 <= cfg["fail_pct"] <= 100:
         raise BadRequest("fail_pct must be between 0 and 100")
     if cfg["steps"]:
-        cfg["total"] = cfg["steps"][-1]
+        cfg["total"] = max(cfg["steps"])
     # subscribe to every device's topic: segments with %i / %c become +
     cfg["sub_topic"] = cfg["sub_topic"] or "/".join("+" if "%" in seg else seg for seg in cfg["topic"].split("/"))
     if cfg["version"] not in ("3", "4", "5"):
@@ -260,6 +277,8 @@ def bench_args(cfg, count, start, rate, role=None):
     args = [mode, "-h", cfg["host"], "-p", str(cfg["port"]), "-V", cfg["version"],
             "-c", str(count), "-R", str(rate), "-k", str(cfg["keepalive"]),
             "--prefix", prefix, "-n", str(start)]
+    if cfg.get("retries", 0) > 0:
+        args += ["--num-retry-connect", str(cfg["retries"])]
     if cfg["username"]:
         args += ["-u", cfg["username"], "-P", cfg["password"]]
     if cfg["tls"]:
@@ -272,6 +291,8 @@ def bench_args(cfg, count, start, rate, role=None):
     stamp = ["--payload-hdrs", "ts"] if cfg["subscribers"] else []
     if mode == "pub":
         args += ["-t", cfg["topic"], "-I", str(cfg["interval"]), "-s", str(cfg["size"]), "-q", str(cfg["qos"])]
+        if role is None and cfg.get("wait_publish"):
+            args += ["--wait-before-publishing"]
         if cfg["payload"]:  # via a file so any content (JSON, quotes, newlines) survives
             args += ["-m", f"template://{CERTS_DIR}/payload.txt"]
         args += stamp
@@ -311,8 +332,9 @@ def preflight(total, subscribers=0, tls=True):
     cap = max_devices()
     if cap and total + subscribers > cap:
         raise BadRequest(f"{total + subscribers:,} connections is more than Docker on macOS ({docker_os}) can open: all "
-                         f"workers share the Mac's 16,384 source ports, so keep it at {cap:,} or less, run swarmqtt on "
-                         f"a Linux machine, or add peers")
+                         f"workers share the Mac's source ports, so keep it at {cap:,} or less per machine, widen the "
+                         f"Mac's port range and raise MAC_MAX_DEVICES (see README), run swarmqtt on a Linux machine, "
+                         f"or add peers")
     need = estimate_mem(total, tls) + estimate_mem(subscribers, tls)  # subscribers get their own worker(s)
     if mem_total and need > mem_total * MAX_MEM_SHARE:
         raise BadRequest(f"{total + subscribers:,} connections on this machine need ~{need / 2**30:.1f} GB RAM but "
@@ -450,7 +472,7 @@ def local_status():
         lat = list(latency.values())
         load = {"mem": sum(u["mem"] for u in usage.values()), "mem_total": mem_total,
                 "cpu": round(sum(u["cpu"] for u in usage.values()), 2), "ncpu": ncpu,
-                "max_devices": max_devices(), "docker_os": docker_os}
+                "machines": 1 + len(PEERS), "max_devices": max_devices(), "docker_os": docker_os}
         return {"workers": ws, "totals": totals, "load": load,
                 "latency_ms": round(sum(lat) / len(lat), 1) if lat else None, "logs": list(logs)[-50:]}
 
@@ -513,12 +535,13 @@ class Run:
         """Start n devices across this machine and the peers. Workers carry the deadline so a restart can honour it."""
         cfg, labels = self.cfg, {"swarmqtt.run": self.record["id"], "swarmqtt.ends_at": str(deadline or "")}
         (local, offset), *rest = split(n, 1 + len(PEERS))
-        for peer, (share, first) in zip(PEERS, rest):
+        rates = [max(1, r) for r, _ in split(cfg["rate"], 1 + len(PEERS))]
+        for i, (peer, (share, first)) in enumerate(zip(PEERS, rest), 1):
             # peers stop themselves at the deadline even if this controller dies
             left = max(1, round(deadline - time.time())) if deadline else 0
             peer_call(peer, "/api/start", {**cfg, "total": share, "offset": cfg["offset"] + first,
-                                           "subscribers": 0, "steps": [], "duration": left})
-        launch(cfg, local, cfg["offset"] + offset, cfg["subscribers"], labels)
+                                           "subscribers": 0, "steps": [], "duration": left, "rate": rates[i]})
+        launch({**cfg, "rate": rates[0]}, local, cfg["offset"] + offset, cfg["subscribers"], labels)
 
     def sample(self, n):
         s = merged_status()

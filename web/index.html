@@ -165,7 +165,7 @@
           <label>Hold each step (s) <input name="hold" type="number" min="10" max="3600" value="60"></label>
           <label>Fail above (%) <input name="fail_pct" type="number" min="0" max="100" step="0.1" value="1"></label>
         </div>
-        <p class="hint">Runs each step in turn and stops at the first one with more connect failures than this, or under 99% connected. Replaces Concurrent devices and Stop after.</p>
+        <p class="hint">Runs each step in turn and stops at the first one with more connect failures than this, or under 99% connected. Steps run in the order written and may repeat, e.g. <code>100000, 100000</code> runs 100k twice and reconnects everything in between. Replaces Concurrent devices and Stop after.</p>
         <div class="row">
           <label>Latency subscribers <input name="subscribers" type="number" min="0" value="0"></label>
           <label>Subscribe topic <input name="sub_topic" placeholder="auto: iot/+/telemetry"></label>
@@ -208,7 +208,9 @@
         <div class="row">
           <label>Conn/sec <input name="rate" type="number" min="1" value="500" required></label>
           <label>Keepalive (s) <input name="keepalive" type="number" min="5" value="60" required></label>
+          <label>Connect retries <input name="retries" type="number" min="0" max="10" value="0"></label>
         </div>
+        <p class="hint">A device that fails to connect tries again this many times before it counts as failed.</p>
         <label>Stop after
           <span class="pair">
             <input name="duration_m" type="number" min="0" max="10080" value="10" required aria-label="Stop after minutes"> min
@@ -223,6 +225,8 @@
             <option value="conn">Connect only</option>
           </select>
         </label>
+        <label class="check"><input type="checkbox" name="wait_publish"> Publish together</label>
+        <p class="hint">Each worker container holds back publishing until it has started every client connection, then all its connected clients publish at the same moment (workers and machines are not synchronised with each other).</p>
         <label>Topic <input name="topic" value="iot/%i/telemetry"></label>
         <p class="hint"><code>%i</code> = device number, <code>%c</code> = client ID</p>
         <div class="row">
@@ -299,6 +303,7 @@ const WORKER_MEM = 575 * 2 ** 20, CONN_MEM = 107 * 2 ** 10, CONN_MEM_PLAIN = 50 
 const GB = b => (b / 2 ** 30).toFixed(1) + ' GB';
 let memTotal = 0;
 let maxDevices = null;  // set on Docker for macOS: all workers share the Mac's source ports
+let machines = 1;
 const SECRET = ['password', 'key'];  // never saved in the browser
 const fmt = n => Number(n).toLocaleString();
 
@@ -340,8 +345,9 @@ function syncTotal(from) {
   let text = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each${steps.length ? ` (largest ramp step ${fmt(total)})` : ''}. Needs ~${GB(need)} RAM`;
   if (memTotal) text += ` of ${GB(memTotal)} in Docker` + (need > memTotal * 0.9 ? ': too much, Start will be refused'
     : need > memTotal * 0.7 ? ': tight, the load machine may run out first' : '');
-  const overPorts = maxDevices && total > maxDevices;
-  if (overPorts) text += `. Docker on macOS shares the Mac's 16,384 source ports across all workers: Start will be refused above ${fmt(maxDevices)}`;
+  const share = Math.ceil(total / machines) + subs;
+  const overPorts = maxDevices && share > maxDevices;
+  if (overPorts) text += `. Docker on macOS shares the Mac's source ports across all workers: Start will be refused above ${fmt(maxDevices)} per machine (raise MAC_MAX_DEVICES)`;
   $('workersHint').textContent = text;
   $('workersHint').className = 'hint' + ((memTotal && need > memTotal * 0.7) || overPorts ? ' bad' : '');
 }
@@ -499,8 +505,9 @@ async function poll() {
     const L = s.load;
     $('cMem').textContent = L.mem_total ? `${(L.mem / 2 ** 30).toFixed(1)} / ${GB(L.mem_total)}` : '-';
     $('cCpu').textContent = L.ncpu ? `${L.cpu.toFixed(1)} / ${L.ncpu}` : '-';
-    if (L.mem_total !== memTotal || (L.max_devices ?? null) !== maxDevices) {
-      memTotal = L.mem_total; maxDevices = L.max_devices ?? null; syncTotal('input');
+    const nextMax = L.max_devices ?? null, nextMachines = L.machines ?? 1;
+    if (L.mem_total !== memTotal || nextMax !== maxDevices || nextMachines !== machines) {
+      memTotal = L.mem_total; maxDevices = nextMax; machines = nextMachines; syncTotal('input');
     }
     const rows = Object.entries(t).sort().map(([k, v]) => `<tr><td>${k}</td><td>${fmt(v.total)}</td><td>${fmt(v.rate)}</td></tr>`);
     $('metrics').innerHTML = rows.join('') || '<tr><td colspan="3" class="sub">No data yet</td></tr>';

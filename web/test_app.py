@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 import app
 
@@ -9,6 +10,99 @@ BASE = {"host": "broker", "port": 8883, "total": 100000, "rate": 2000, "keepaliv
 
 
 class AppTest(unittest.TestCase):
+    def test_deploy_splits_rate_across_peers(self):
+        saved_peer_call, saved_launch, saved_peers = app.peer_call, app.launch, app.PEERS
+        peer_calls, launches = [], []
+        try:
+            app.peer_call = lambda peer, path, body=None: peer_calls.append((peer, path, body))
+            app.launch = lambda cfg, total, offset, subscribers, labels: launches.append((cfg, total, offset, subscribers, labels))
+            app.PEERS = ["http://peer1:8082", "http://peer2:8082"]
+
+            cfg = app.parse_cfg({**BASE, "rate": 500})
+            run = app.Run(cfg)
+            run.deploy(1000, None)
+            local_rate = launches[-1][0]["rate"]
+            peer_rates = [body["rate"] for _, _, body in peer_calls[-2:]]
+            self.assertEqual(local_rate + sum(peer_rates), 500)
+            self.assertEqual(sorted([local_rate] + peer_rates), [166, 167, 167])
+
+            cfg2 = app.parse_cfg({**BASE, "rate": 2})
+            run2 = app.Run(cfg2)
+            run2.deploy(1000, None)
+            local_rate2 = launches[-1][0]["rate"]
+            peer_rates2 = [body["rate"] for _, _, body in peer_calls[-2:]]
+            self.assertTrue(all(r >= 1 for r in [local_rate2] + peer_rates2))
+        finally:
+            app.peer_call, app.launch, app.PEERS = saved_peer_call, saved_launch, saved_peers
+
+    def test_connect_retries(self):
+        cfg3 = app.parse_cfg({**BASE, "retries": 3})
+        self.assertEqual(cfg3["retries"], 3)
+        for role in (None, "sub"):
+            args3 = app.bench_args(cfg3, 10, 0, 10, role=role)
+            self.assertIn("--num-retry-connect", args3)
+            self.assertEqual(args3[args3.index("--num-retry-connect") + 1], "3")
+        cfg_conn = app.parse_cfg({**BASE, "mode": "conn", "retries": 3})
+        args_conn = app.bench_args(cfg_conn, 10, 0, 10)
+        self.assertIn("--num-retry-connect", args_conn)
+        self.assertEqual(args_conn[args_conn.index("--num-retry-connect") + 1], "3")
+
+        cfg0 = app.parse_cfg({**BASE, "retries": 0})
+        self.assertEqual(cfg0["retries"], 0)
+        for role in (None, "sub"):
+            args0 = app.bench_args(cfg0, 10, 0, 10, role=role)
+            self.assertNotIn("--num-retry-connect", args0)
+
+        for bad in (-1, 11):
+            with self.assertRaises(app.BadRequest):
+                app.parse_cfg({**BASE, "retries": bad})
+
+        import inspect
+        import mcp_server
+        self.assertEqual(inspect.signature(mcp_server.start_load_test).parameters["connect_retries"].default, 0)
+        saved_start, saved_current = app.start, app.current
+        try:
+            started = []
+            class DummyRun:
+                record = {"id": "dummy"}
+            app.start = lambda c: started.append(c)
+            app.current = DummyRun()
+            mcp_server.start_load_test("broker", 100, connect_retries=3)
+            self.assertEqual(started[0]["retries"], 3)
+        finally:
+            app.start, app.current = saved_start, saved_current
+
+    def test_wait_before_publishing(self):
+        cfg_on = app.parse_cfg({**BASE, "mode": "pub", "wait_publish": True})
+        self.assertTrue(cfg_on["wait_publish"])
+        args_pub = app.bench_args(cfg_on, 10, 0, 10)
+        self.assertIn("--wait-before-publishing", args_pub)
+
+        args_sub_role = app.bench_args(cfg_on, 10, 0, 10, role="sub")
+        self.assertNotIn("--wait-before-publishing", args_sub_role)
+
+        cfg_off = app.parse_cfg({**BASE, "mode": "pub", "wait_publish": False})
+        self.assertFalse(cfg_off["wait_publish"])
+        self.assertNotIn("--wait-before-publishing", app.bench_args(cfg_off, 10, 0, 10))
+
+        cfg_sub = app.parse_cfg({**BASE, "mode": "sub", "wait_publish": True})
+        self.assertNotIn("--wait-before-publishing", app.bench_args(cfg_sub, 10, 0, 10))
+
+        import inspect
+        import mcp_server
+        self.assertFalse(inspect.signature(mcp_server.start_load_test).parameters["wait_before_publishing"].default)
+        saved_start, saved_current = app.start, app.current
+        try:
+            started = []
+            class DummyRun:
+                record = {"id": "dummy"}
+            app.start = lambda c: started.append(c)
+            app.current = DummyRun()
+            mcp_server.start_load_test("broker", 100, wait_before_publishing=True)
+            self.assertTrue(started[0]["wait_publish"])
+        finally:
+            app.start, app.current = saved_start, saved_current
+
     def test_plan_covers_total_without_overlap(self):
         p = app.plan(100001, 2000)
         self.assertEqual(sum(c for c, _, _ in p), 100001)
@@ -87,15 +181,40 @@ class AppTest(unittest.TestCase):
                 app.docker_os = name
                 self.assertEqual(app.max_devices(), app.MAC_MAX_DEVICES)
                 app.preflight(app.MAC_MAX_DEVICES)
-                with self.assertRaisesRegex(app.BadRequest, "source ports"):
+                with self.assertRaisesRegex(app.BadRequest, "source ports") as ctx:
                     app.preflight(app.MAC_MAX_DEVICES + 1)
-                with self.assertRaisesRegex(app.BadRequest, "source ports"):  # subscribers use ports too
+                self.assertIn("MAC_MAX_DEVICES", str(ctx.exception))
+                with self.assertRaisesRegex(app.BadRequest, "source ports") as ctx:  # subscribers use ports too
                     app.preflight(app.MAC_MAX_DEVICES, subscribers=1)
+                self.assertIn("MAC_MAX_DEVICES", str(ctx.exception))
             app.docker_os = "Ubuntu 24.04.3 LTS"
             self.assertIsNone(app.max_devices())
             app.preflight(app.MAC_MAX_DEVICES + 1)
         finally:
             app.docker_os = ""
+
+    def test_env_int(self):
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop("TEST_VAR", None)
+            self.assertEqual(app._env_int("TEST_VAR", 15000), 15000)
+        with unittest.mock.patch.dict(os.environ, {"TEST_VAR": ""}):
+            self.assertEqual(app._env_int("TEST_VAR", 15000), 15000)
+        with unittest.mock.patch.dict(os.environ, {"TEST_VAR": "50000"}):
+            self.assertEqual(app._env_int("TEST_VAR", 15000), 50000)
+        for bad in ("0", "-1", "abc"):
+            with unittest.mock.patch.dict(os.environ, {"TEST_VAR": bad}):
+                with self.assertRaises(SystemExit) as ctx:
+                    app._env_int("TEST_VAR", 15000)
+                self.assertIn("TEST_VAR", str(ctx.exception))
+
+    def test_local_status_machines(self):
+        saved_workers, saved_peers = app.workers, app.PEERS
+        try:
+            app.workers = lambda: []
+            app.PEERS = ["http://peer1:8082", "http://peer2:8082"]
+            self.assertEqual(app.local_status()["load"]["machines"], 1 + len(app.PEERS))
+        finally:
+            app.workers, app.PEERS = saved_workers, saved_peers
 
     def test_stop_saves_worker_logs_before_removing(self):
         events = []
@@ -161,9 +280,23 @@ class AppTest(unittest.TestCase):
         self.assertEqual(app.parse_cfg(BASE)["duration"], 0)
         self.assertEqual(app.parse_cfg({**BASE, "duration": "600"})["duration"], 600)
 
-    def test_ramp_steps_are_sorted_and_set_total(self):
-        cfg = app.parse_cfg({**BASE, "steps": "1000, 50000,1000"})
-        self.assertEqual((cfg["steps"], cfg["total"]), ([1000, 50000], 50000))
+    def test_ramp_steps_keep_order_and_repeats_and_set_total(self):
+        cfg = app.parse_cfg({**BASE, "steps": "100000, 50000, 100000"})
+        self.assertEqual((cfg["steps"], cfg["total"]), ([100000, 50000, 100000], 100000))
+
+    def test_headline_highest_passing_step_any_order(self):
+        import report
+        cfg = app.parse_cfg({**BASE, "steps": "100000, 50000, 30000"})
+        rec = {"id": "1", "started": 0, "cfg": cfg, "status": "stopped", "reason": "",
+               "steps": [{"devices": 100000, "ok": True, "reason": ""},
+                         {"devices": 50000, "ok": True, "reason": ""},
+                         {"devices": 30000, "ok": False, "reason": "failed"}]}
+        self.assertEqual(report.headline(rec), "Held 100,000 devices. At 30,000 devices: failed.")
+
+        rec_done = {"id": "1", "started": 0, "cfg": cfg, "status": "done", "reason": "",
+                    "steps": [{"devices": 100000, "ok": True, "reason": ""},
+                              {"devices": 50000, "ok": True, "reason": ""}]}
+        self.assertEqual(report.headline(rec_done), "Held 100,000 devices. Every step passed, so the limit is above 100,000.")
 
     def test_split_across_machines_without_id_overlap(self):
         self.assertEqual(app.split(10, 3), [(4, 0), (3, 4), (3, 7)])

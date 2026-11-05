@@ -1,6 +1,6 @@
 FROM ghcr.io/emqx/emqx-builder/5.6-3:1.18.3-27.3.4.2-4-debian13 AS bench
 ARG BENCH_REPO=https://github.com/Kit09K/emqtt-bench.git
-ARG BENCH_REF=2b33877d4ca41b58fdf3732fbb13dca39b93988d
+ARG BENCH_REF=dff5508e9167dd183e0a00e14d892126bf715012
 RUN git clone "$BENCH_REPO" /emqtt_bench && cd /emqtt_bench && git checkout "$BENCH_REF"
 WORKDIR /emqtt_bench
 ENV BUILD_WITHOUT_QUIC=1

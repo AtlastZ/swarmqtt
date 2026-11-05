@@ -56,6 +56,8 @@ def start_load_test(
     devices: int,
     port: int = 8883,
     connections_per_sec: int = 500,
+    connect_retries: int = 0,
+    wait_before_publishing: bool = False,
     mode: Literal["pub", "sub", "conn"] = "pub",
     topic: str = "iot/%i/telemetry",
     publish_interval_ms: int = 10000,
@@ -88,6 +90,8 @@ def start_load_test(
     %TIMESTAMP%, %TIMESTAMPMS%, %UNIQUE% (unique number per message, not sequential), %RANDOM% (payload_bytes random bytes),
     %RANGE:<min>:<max>% (new random value in range on every message) and %WALK:<min>:<max>:<step>% (random walk, own value per device, moves a random amount of at most step per message).
     Decimals follow the most precise number written (40:60 integers, 20.0:30.0 one decimal); typos are refused.
+    `connect_retries`: times a failed client retries connecting before it counts as connect_fail (0-10, default 0).
+    `wait_before_publishing`: hold back publishing until each worker container has started all client connections (default False).
     The broker certificate is NOT verified during the load test.
     The test stops by itself after `duration_sec` (0 = run until stop_load_test). It is refused if the
     estimated RAM does not fit the Docker host.
@@ -103,7 +107,7 @@ def start_load_test(
     cfg = _cfg(
         host=host, port=port, total=devices, rate=connections_per_sec, mode=mode, topic=topic,
         interval=publish_interval_ms, size=payload_bytes, payload=payload, duration=duration_sec,
-        steps=ramp_steps or [], hold=hold_sec, fail_pct=fail_pct, subscribers=subscribers, sub_topic=sub_topic, qos=qos, keepalive=keepalive, tls=tls,
+        steps=ramp_steps or [], hold=hold_sec, fail_pct=fail_pct, subscribers=subscribers, sub_topic=sub_topic, qos=qos, keepalive=keepalive, retries=connect_retries, wait_publish=wait_before_publishing, tls=tls,
         tls_version=tls_version, version=mqtt_version, prefix=client_id_prefix, username=username,
         password=password, cert=client_cert_pem, key=client_key_pem)
     try:
