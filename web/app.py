@@ -156,6 +156,30 @@ def parse_cfg(raw):
         raise BadRequest("fail_pct must be between 0 and 100")
     if cfg["steps"]:
         cfg["total"] = max(cfg["steps"])
+    raw_weights = raw.get("weights")
+    if raw_weights in (None, "", []):
+        cfg["weights"] = None
+    else:
+        if not isinstance(raw_weights, (list, tuple)) or isinstance(raw_weights, (str, bytes)):
+            raise BadRequest("weights must be a list")
+        if len(raw_weights) != 1 + len(PEERS):
+            raise BadRequest(f"weights must have {1 + len(PEERS)} values")
+        parsed = []
+        for x in raw_weights:
+            if isinstance(x, bool):
+                raise BadRequest("weights must be integers")
+            try:
+                if isinstance(x, float) and not x.is_integer():
+                    raise ValueError
+                v = int(x)
+            except (TypeError, ValueError):
+                raise BadRequest("weights must be integers")
+            if v < 0:
+                raise BadRequest("weights must be non-negative")
+            parsed.append(v)
+        if all(v == 0 for v in parsed):
+            raise BadRequest("all weights cannot be 0")
+        cfg["weights"] = parsed
     # subscribe to every device's topic: segments with %i / %c become +
     cfg["sub_topic"] = cfg["sub_topic"] or "/".join("+" if "%" in seg else seg for seg in cfg["topic"].split("/"))
     if cfg["version"] not in ("3", "4", "5"):
@@ -322,8 +346,39 @@ def split(total, machines):
     return [(n, sum(shares[:i])) for i, n in enumerate(shares)]
 
 
+def split_weighted(total, weights):
+    if not weights:
+        return []
+    total_w = sum(weights)
+    if total_w == 0:
+        return split(total, len(weights))
+    base = [(total * w) // total_w for w in weights]
+    rem = [(total * w) % total_w for w in weights]
+    diff = total - sum(base)
+    order = sorted(range(len(weights)), key=lambda i: rem[i], reverse=True)
+    for i in order[:diff]:
+        base[i] += 1
+    out = []
+    offset = 0
+    for c in base:
+        out.append((c, offset))
+        offset += c
+    return out
+
+
 def estimate_mem(total, tls=True):
     return math.ceil(total / PER_WORKER) * WORKER_MEM + total * (CONN_MEM if tls else CONN_MEM_PLAIN)
+
+
+def capacity(mem_total, max_devices, tls):
+    if not mem_total or mem_total <= 0:
+        return 0
+    budget = mem_total * MAX_MEM_SHARE
+    limit = MAX_TOTAL if max_devices is None else max_devices
+    n = 0
+    while n + 1000 <= limit and estimate_mem(n + 1000, tls) <= budget:
+        n += 1000
+    return n
 
 
 def max_devices():
@@ -345,7 +400,7 @@ def preflight(total, subscribers=0, tls=True):
 
 
 def workers():
-    return dk.containers.list(all=True, filters={"label": LABEL})
+    return dk.containers.list(all=True, filters={"label": LABEL}) if dk else []
 
 
 def follow(container):
@@ -475,7 +530,9 @@ def local_status():
         lat = list(latency.values())
         load = {"mem": sum(u["mem"] for u in usage.values()), "mem_total": mem_total,
                 "cpu": round(sum(u["cpu"] for u in usage.values()), 2), "ncpu": ncpu,
-                "machines": 1 + len(PEERS), "max_devices": max_devices(), "docker_os": docker_os}
+                "machines": 1 + len(PEERS), "max_devices": max_devices(), "docker_os": docker_os,
+                "capacity": capacity(mem_total, max_devices(), True),
+                "capacity_plain": capacity(mem_total, max_devices(), False)}
         return {"workers": ws, "totals": totals, "load": load,
                 "latency_ms": round(sum(lat) / len(lat), 1) if lat else None, "logs": list(logs)[-50:]}
 
@@ -484,24 +541,50 @@ def merged_status():
     """This machine plus every peer, summed. A peer that doesn't answer is reported, not fatal."""
     s = local_status()
     running_machines = 1 if any(w.get("status") == "running" for w in s["workers"]) else 0
+    s_load = s.get("load", {})
+    cap = s_load.get("capacity") if "capacity" in s_load else capacity(s_load.get("mem_total", 0), s_load.get("max_devices"), True)
+    cap_plain = s_load.get("capacity_plain") if "capacity_plain" in s_load else capacity(s_load.get("mem_total", 0), s_load.get("max_devices"), False)
+    machines_info = [{"name": "this machine", "capacity": cap, "capacity_plain": cap_plain, "ok": True}]
     for peer in PEERS:
         try:
             p = peer_call(peer, "/api/status")
         except Exception as e:
             s["logs"].append(f"[{peer}] unreachable: {e}")
+            machines_info.append({"name": peer, "capacity": 0, "capacity_plain": 0, "ok": False})
             continue
+        if p is None:
+            p = {}
         if p.get("running"):
             running_machines += 1
-        s["workers"] += [{**w, "name": f"{peer} {w['name']}"} for w in p["workers"]]
-        for k, v in p["totals"].items():
+        s["workers"] += [{**w, "name": f"{peer} {w['name']}"} for w in p.get("workers", [])]
+        for k, v in p.get("totals", {}).items():
             t = s["totals"].setdefault(k, {"total": 0, "rate": 0.0})
             t["total"] += v["total"]
             t["rate"] = round(t["rate"] + v["rate"], 2)
+        p_load = p.get("load", {})
         for k in ("mem", "mem_total", "cpu", "ncpu"):
-            s["load"][k] += p["load"][k]
-        s["logs"] += [f"[{peer}] {line}" for line in p["logs"][-10:]]
+            s["load"][k] += p_load.get(k, 0)
+        s["logs"] += [f"[{peer}] {line}" for line in p.get("logs", [])[-10:]]
+        p_cap = p_load["capacity"] if "capacity" in p_load else capacity(p_load.get("mem_total", 0), p_load.get("max_devices"), True)
+        p_plain = p_load["capacity_plain"] if "capacity_plain" in p_load else capacity(p_load.get("mem_total", 0), p_load.get("max_devices"), False)
+        machines_info.append({"name": peer, "capacity": p_cap, "capacity_plain": p_plain, "ok": True})
     s["load"]["machines_running"] = running_machines
+    s["machines"] = machines_info
     return s
+
+
+def machine_weights(cfg):
+    if cfg.get("weights"):
+        return cfg["weights"]
+    machines = merged_status().get("machines", [])
+    for m in machines:
+        if m["name"] != "this machine" and not m.get("ok"):
+            raise BadRequest(f"peer {m['name']} is unreachable")
+    return [m["capacity"] if cfg.get("tls") else m["capacity_plain"] for m in machines]
+
+
+def machine_shares(cfg, n, weights=None):
+    return split_weighted(n, weights or machine_weights(cfg))
 
 
 # --- runs: one start = one run, recorded to DATA_DIR/runs/<id>.json ---
@@ -551,14 +634,17 @@ class Run:
     def deploy(self, n, deadline):
         """Start n devices across this machine and the peers. Workers carry the deadline so a restart can honour it."""
         cfg, labels = self.cfg, {"swarmqtt.run": self.record["id"], "swarmqtt.ends_at": str(deadline or "")}
-        (local, offset), *rest = split(n, 1 + len(PEERS))
-        rates = [max(1, r) for r, _ in split(cfg["rate"], 1 + len(PEERS))]
+        weights = machine_weights(cfg)
+        shares = machine_shares(cfg, n, weights)
+        rates = [max(1, r) if share > 0 else 0 for (share, _), (r, _) in zip(shares, split_weighted(cfg["rate"], weights))]
+        (local, offset), *rest = shares
         for i, (peer, (share, first)) in enumerate(zip(PEERS, rest), 1):
-            # peers stop themselves at the deadline even if this controller dies
-            left = max(1, round(deadline + PEER_GRACE - time.time())) if deadline else 0
-            peer_call(peer, "/api/start", {**cfg, "total": share, "offset": cfg["offset"] + first,
-                                           "subscribers": 0, "steps": [], "duration": left, "rate": rates[i]})
-        launch({**cfg, "rate": rates[0]}, local, cfg["offset"] + offset, cfg["subscribers"], labels)
+            if share > 0:
+                left = max(1, round(deadline + PEER_GRACE - time.time())) if deadline else 0
+                peer_call(peer, "/api/start", {**cfg, "total": share, "offset": cfg["offset"] + first, "weights": None,
+                                               "subscribers": 0, "steps": [], "duration": left, "rate": rates[i]})
+        if local > 0 or cfg["subscribers"]:
+            launch({**cfg, "rate": max(1, rates[0])}, local, cfg["offset"] + offset, cfg["subscribers"], labels)
 
     def sample(self, n):
         s = merged_status()
@@ -669,7 +755,7 @@ def stop():
 def start(cfg):
     global current
     biggest = max(cfg["steps"] or [cfg["total"]])
-    preflight(split(biggest, 1 + len(PEERS))[0][0], cfg["subscribers"], cfg["tls"])
+    preflight(machine_shares(cfg, biggest)[0][0], cfg["subscribers"], cfg["tls"])
     stop()
     with lock:
         logs.clear()

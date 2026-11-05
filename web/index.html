@@ -205,6 +205,13 @@
         </label>
         <input id="totalRange" type="range" min="1000" max="200000" step="1000" value="100000" aria-label="Concurrent devices slider" style="width:100%">
         <p class="hint" id="workersHint"></p>
+        <div id="machinesBox" hidden style="margin:8px 0 12px">
+          <label style="margin-bottom:6px">Machines</label>
+          <table style="font-size:12px;width:100%;table-layout:fixed">
+            <thead><tr><th>Machine</th><th style="width:64px">Capacity</th><th style="width:72px">Weight</th><th style="width:56px;text-align:right">Share</th></tr></thead>
+            <tbody id="machinesBody"></tbody>
+          </table>
+        </div>
         <div class="row">
           <label>Conn/sec <input name="rate" type="number" min="1" value="500" required></label>
           <label>Keepalive (s) <input name="keepalive" type="number" min="5" value="60" required></label>
@@ -303,16 +310,48 @@ const GB = b => (b / 2 ** 30).toFixed(1) + ' GB';
 let memTotal = 0;
 let maxDevices = null;  // set on Docker for macOS: all workers share the Mac's source ports
 let machines = 1;
+let currentMachines = [];
 const SECRET = ['password', 'key'];  // never saved in the browser
 const fmt = n => Number(n).toLocaleString();
+
+function manualWeights() {
+  if (!currentMachines || currentMachines.length < 2) return null;
+  const isTls = f.elements.tls.checked;
+  const inps = currentMachines.map((_, i) => f.elements['weight-' + i]);
+  if (!inps.some(inp => inp && inp.value.trim() !== '')) return null;
+  return currentMachines.map((m, i) => {
+    const v = inps[i] ? inps[i].value.trim() : '';
+    if (v !== '') return Math.max(0, Math.floor(+v || 0));
+    return m.ok ? (isTls ? m.capacity : m.capacity_plain) : 0;
+  });
+}
+
+function splitWeighted(total, weights) {
+  if (!weights || !weights.length) return [];
+  const totalW = weights.reduce((a, b) => a + b, 0);
+  if (totalW === 0) {
+    const m = weights.length;
+    return weights.map((_, i) => Math.floor(total / m) + (i < total % m ? 1 : 0));
+  }
+  const base = weights.map(w => Math.floor((total * w) / totalW));
+  const rem = weights.map(w => (total * w) % totalW);
+  let diff = total - base.reduce((a, b) => a + b, 0);
+  const order = weights.map((_, i) => i).sort((a, b) => rem[b] - rem[a]);
+  for (let i = 0; i < diff; i++) {
+    base[order[i]]++;
+  }
+  return base;
+}
 
 function formData() {
   const d = {};
   for (const el of f.elements) {
-    if (!el.name) continue;
+    if (!el.name || el.name.startsWith('weight-')) continue;
     d[el.name] = el.type === 'checkbox' ? el.checked : el.value;
   }
   d.duration = (+d.duration_m || 0) * 60 + (+d.duration_s || 0);
+  const w = manualWeights();
+  if (w) d.weights = w;
   return d;
 }
 
@@ -332,6 +371,39 @@ function load() {
   }
 }
 
+function renderMachines(machinesList) {
+  currentMachines = machinesList || [];
+  const box = $('machinesBox');
+  if (!currentMachines || currentMachines.length <= 1) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const tbody = $('machinesBody');
+  const isTls = f.elements.tls.checked;
+  if (tbody.children.length !== currentMachines.length) {
+    tbody.innerHTML = currentMachines.map((m, i) => {
+      const cap = isTls ? m.capacity : m.capacity_plain;
+      const statusBadge = m.ok ? '' : ' <span class="bad">(unreachable)</span>';
+      return `<tr><td title="${esc(m.name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.name.replace(/^https?:\/\//, ''))}${statusBadge}</td><td id="cap-${i}">${fmt(cap)}</td>`
+        + `<td><input name="weight-${i}" id="weight-${i}" type="number" min="0" placeholder="${cap}" style="width:100%;padding:3px 6px"></td>`
+        + `<td id="share-${i}" style="text-align:right">0</td></tr>`;
+    }).join('');
+    currentMachines.forEach((_, i) => {
+      const inp = $('weight-' + i);
+      if (inp) inp.oninput = () => syncTotal('input');
+    });
+  } else {
+    currentMachines.forEach((m, i) => {
+      const cap = isTls ? m.capacity : m.capacity_plain;
+      const cel = $('cap-' + i);
+      if (cel) cel.textContent = fmt(cap);
+      const inp = $('weight-' + i);
+      if (inp) inp.placeholder = cap;
+    });
+  }
+}
+
 function syncTotal(from) {
   if (from === 'range') f.elements.total.value = $('totalRange').value;
   else $('totalRange').value = f.elements.total.value;
@@ -344,11 +416,34 @@ function syncTotal(from) {
   let text = `${n} worker container(s), up to ${fmt(PER_WORKER)} devices each${steps.length ? ` (largest ramp step ${fmt(total)})` : ''}. Needs ~${GB(need)} RAM`;
   if (memTotal) text += ` of ${GB(memTotal)} in Docker` + (need > memTotal * 0.9 ? ': too much, Start will be refused'
     : need > memTotal * 0.7 ? ': tight, the load machine may run out first' : '');
-  const share = Math.ceil(total / machines) + subs;
+
+  let localShare = total, peerDown = false;
+  if (currentMachines && currentMachines.length > 1) {
+    const isTls = f.elements.tls.checked;
+    currentMachines.forEach((m, i) => {
+      const cap = isTls ? m.capacity : m.capacity_plain;
+      const cel = $('cap-' + i);
+      if (cel) cel.textContent = fmt(cap);
+      const inp = f.elements['weight-' + i];
+      if (inp) inp.placeholder = cap;
+    });
+    const manual = manualWeights();
+    const weights = manual || currentMachines.map(m => m.ok ? (isTls ? m.capacity : m.capacity_plain) : 0);
+    const shares = splitWeighted(total, weights);
+    const down = currentMachines.filter((m, i) => !m.ok && !(manual && manual[i] === 0)).map(m => m.name);
+    peerDown = down.length > 0;
+    if (peerDown) text += `. Unreachable: ${down.join(', ')}. Start will be refused; set its weight to 0 to run without it`;
+    currentMachines.forEach((_, i) => {
+      const sel = $('share-' + i);
+      if (sel) sel.textContent = fmt(shares[i] || 0);
+    });
+    localShare = shares[0] || 0;
+  }
+  const share = localShare + subs;
   const overPorts = maxDevices && share > maxDevices;
   if (overPorts) text += `. Docker on macOS shares the Mac's source ports across all workers: Start will be refused above ${fmt(maxDevices)} per machine (raise MAC_MAX_DEVICES)`;
   $('workersHint').textContent = text;
-  $('workersHint').className = 'hint' + ((memTotal && need > memTotal * 0.7) || overPorts ? ' bad' : '');
+  $('workersHint').className = 'hint' + ((memTotal && need > memTotal * 0.7) || overPorts || peerDown ? ' bad' : '');
 }
 
 function say(text, ok) {
@@ -504,10 +599,12 @@ async function poll() {
     const L = s.load;
     $('cMem').textContent = L.mem_total ? `${(L.mem / 2 ** 30).toFixed(1)} / ${GB(L.mem_total)}` : '-';
     $('cCpu').textContent = L.ncpu ? `${L.cpu.toFixed(1)} / ${L.ncpu}` : '-';
+    if (s.machines) renderMachines(s.machines);
     const nextMax = L.max_devices ?? null, nextMachines = L.machines ?? 1;
     if (L.mem_total !== memTotal || nextMax !== maxDevices || nextMachines !== machines) {
-      memTotal = L.mem_total; maxDevices = nextMax; machines = nextMachines; syncTotal('input');
+      memTotal = L.mem_total; maxDevices = nextMax; machines = nextMachines;
     }
+    syncTotal('input');
     const rows = Object.entries(t).sort().map(([k, v]) => `<tr><td>${k}</td><td>${fmt(v.total)}</td><td>${fmt(v.rate)}</td></tr>`);
     $('metrics').innerHTML = rows.join('') || '<tr><td colspan="3" class="sub">No data yet</td></tr>';
     $('logs').textContent = s.logs.join('\n') || '-';
