@@ -103,11 +103,36 @@ class AppTest(unittest.TestCase):
         finally:
             app.start, app.current = saved_start, saved_current
 
+    def test_no_stale_publish_twice_caveat(self):
+        report_path = os.path.join(os.path.dirname(app.__file__), "report.py")
+        with open(report_path) as f:
+            report_src = f.read()
+        self.assertNotIn("published*", report_src)
+        self.assertNotIn("about twice", report_src)
+        self.assertIn("Connected is cumulative", report_src)
+
+        html_path = os.path.join(os.path.dirname(app.__file__), "index.html")
+        with open(html_path) as f:
+            html_src = f.read()
+        self.assertNotIn("published*", html_src)
+        self.assertNotIn("about twice", html_src)
+
     def test_plan_covers_total_without_overlap(self):
         p = app.plan(100001, 2000)
         self.assertEqual(sum(c for c, _, _ in p), 100001)
         self.assertEqual([s for _, s, _ in p], [0, 25000, 50000, 75000, 100000])
         self.assertTrue(all(c <= app.PER_WORKER for c, _, _ in p))
+
+    def test_plan_rates_proportional_to_device_counts(self):
+        p = app.plan(33334, 167)
+        self.assertEqual(len(p), 2)
+        (c1, s1, r1), (c2, s2, r2) = p
+        self.assertEqual((c1, c2), (25000, 8334))
+        self.assertAlmostEqual(r1, 125, delta=1)
+        self.assertAlmostEqual(r2, 42, delta=1)
+        self.assertIn(r1 + r2, (166, 167, 168))
+        t1, t2 = c1 / r1, c2 / r2
+        self.assertLess(abs(t1 - t2) / max(t1, t2), 0.05)
 
     def test_bench_args_tls_with_client_cert(self):
         cfg = app.parse_cfg({**BASE, "cert": "C", "key": "K"})
@@ -420,6 +445,109 @@ class AppTest(unittest.TestCase):
                     self.assertEqual(app.resolve_bench_image(), "swarmqtt:latest")
         finally:
             app.dk = saved_dk
+
+    def test_deploy_peer_grace_duration(self):
+        saved_peer_call, saved_launch, saved_peers = app.peer_call, app.launch, app.PEERS
+        peer_calls, launches = [], []
+        try:
+            app.peer_call = lambda peer, path, body=None: peer_calls.append((peer, path, body))
+            app.launch = lambda cfg, total, offset, subscribers, labels: launches.append((cfg, total, offset, subscribers, labels))
+            app.PEERS = ["http://peer1:8082"]
+            self.assertEqual(getattr(app, "PEER_GRACE", None), 30)
+            cfg = app.parse_cfg(BASE)
+            run = app.Run(cfg)
+            deadline = app.time.time() + 100
+            run.deploy(1000, deadline)
+            duration = peer_calls[-1][2]["duration"]
+            self.assertAlmostEqual(duration, 130, delta=2)
+            run.deploy(1000, None)
+            self.assertEqual(peer_calls[-1][2]["duration"], 0)
+        finally:
+            app.peer_call, app.launch, app.PEERS = saved_peer_call, saved_launch, saved_peers
+
+    def test_merged_status_machines_running_and_sample(self):
+        saved_local_status, saved_peer_call, saved_peers = app.local_status, app.peer_call, app.PEERS
+        try:
+            app.local_status = lambda: {
+                "workers": [{"name": "swarmqtt-worker-0", "status": "running"}],
+                "totals": {}, "load": {"mem": 1, "mem_total": 2, "cpu": 0.5, "ncpu": 2}, "latency_ms": None, "logs": []
+            }
+            app.PEERS = ["http://peer1:8082", "http://peer2:8082"]
+            app.peer_call = lambda peer, path, body=None: {
+                "running": (peer == "http://peer1:8082"),
+                "workers": [], "totals": {}, "load": {"mem": 0, "mem_total": 0, "cpu": 0, "ncpu": 0}, "logs": []
+            }
+            s = app.merged_status()
+            self.assertEqual(s["load"].get("machines_running"), 2)
+            run = app.Run(app.parse_cfg(BASE))
+            saved_merged = app.merged_status
+            try:
+                app.merged_status = lambda: s
+                row = run.sample(100)
+                self.assertEqual(row.get("machines"), 2)
+            finally:
+                app.merged_status = saved_merged
+        finally:
+            app.local_status, app.peer_call, app.PEERS = saved_local_status, saved_peer_call, saved_peers
+
+    def test_judge_row_and_step_ignores_final_row_with_fewer_machines(self):
+        self.assertTrue(hasattr(app, "judge_row"))
+        self.assertEqual(app.judge_row([]), {})
+        rows_plain = [{"connected": 100}, {"connected": 200}]
+        self.assertEqual(app.judge_row(rows_plain), {"connected": 200})
+        rows_ramp = [
+            {"connected": 38000, "machines": 3},
+            {"connected": 39636, "machines": 3},
+            {"connected": 13334, "machines": 1},
+        ]
+        self.assertEqual(app.judge_row(rows_ramp), {"connected": 39636, "machines": 3})
+
+        run = app.Run(app.parse_cfg({**BASE, "steps": [40000], "hold": 10}))
+        run.deploy = lambda n, deadline: None
+        sample_seq = [
+            {"t": 1.0, "devices": 40000, "connected": 39636, "failed": 0, "conn_rate": 0, "pub_rate": 0,
+             "recv_rate": 0, "latency_ms": None, "mem": 100, "mem_total": 1000, "cpu": 1.0, "ncpu": 1, "machines": 3},
+            {"t": 2.0, "devices": 40000, "connected": 39636, "failed": 0, "conn_rate": 0, "pub_rate": 0,
+             "recv_rate": 0, "latency_ms": None, "mem": 100, "mem_total": 1000, "cpu": 1.0, "ncpu": 1, "machines": 3},
+            {"t": 3.0, "devices": 40000, "connected": 13334, "failed": 0, "conn_rate": 0, "pub_rate": 0,
+             "recv_rate": 0, "latency_ms": None, "mem": 100, "mem_total": 1000, "cpu": 1.0, "ncpu": 1, "machines": 1},
+        ]
+        seq_idx = [0]
+        def fake_sample(n):
+            idx = min(seq_idx[0], len(sample_seq) - 1)
+            seq_idx[0] += 1
+            row = sample_seq[idx]
+            run.record["samples"].append(row)
+            return row
+        run.sample = fake_sample
+        saved_wait = run.cancel.wait
+        run.cancel.wait = lambda timeout: seq_idx[0] >= 3
+        try:
+            ok = run.step(40000)
+            self.assertTrue(ok)
+            self.assertEqual(run.record["steps"][-1]["connected"], 39636)
+            self.assertTrue(run.record["steps"][-1]["ok"])
+        finally:
+            run.cancel.wait = saved_wait
+
+    def test_report_filter_samples_skips_incomplete_rows(self):
+        import report
+        filter_fn = report.filter_samples
+        self.assertIsNotNone(filter_fn)
+        rows_plain = [{"t": 0}, {"t": 2}]
+        self.assertEqual(filter_fn(rows_plain), rows_plain)
+        rows_incomplete = [
+            {"t": 0, "machines": 3},
+            {"t": 2, "machines": 3},
+            {"t": 4, "machines": 1},
+        ]
+        self.assertEqual(filter_fn(rows_incomplete), [{"t": 0, "machines": 3}, {"t": 2, "machines": 3}])
+        rows_mixed = [
+            {"t": 0},
+            {"t": 2, "machines": 3},
+            {"t": 4, "machines": 1},
+        ]
+        self.assertEqual(filter_fn(rows_mixed), [{"t": 0}, {"t": 2, "machines": 3}])
 
 
 if __name__ == "__main__":

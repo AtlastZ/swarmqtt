@@ -267,7 +267,6 @@
       <div class="chart"><h3>Latency (ms, average)</h3><div id="chLat"></div></div>
       <div class="chart"><h3>Load machine RAM (GB)</h3><div id="chMem"></div></div>
     </div>
-    <p class="hint">* emqtt-bench counts each publish about twice. Delivered (what one latency subscriber received) or broker metrics show the real message rate.</p>
     <div id="stepsBox" hidden>
       <h3 style="font-size:14px;margin:16px 0 6px">Ramp steps</h3>
       <table>
@@ -460,7 +459,7 @@ function drawCharts(rows) {
   const S1 = 'var(--series-1)', S2 = 'var(--series-2)', REF = 'var(--muted)';
   chart($('chConn'), rows, [{ label: 'connected', key: 'connected', color: S1 }, { label: 'target', key: 'devices', color: REF, dash: true }]);
   const subs = rows.some(r => r.recv_rate > 0);
-  chart($('chMsg'), rows, [{ label: 'published*', key: 'pub_rate', color: S1 }].concat(subs ? [{ label: 'delivered', key: 'recv_rate', color: S2 }] : []));
+  chart($('chMsg'), rows, [{ label: 'published', key: 'pub_rate', color: S1 }].concat(subs ? [{ label: 'delivered', key: 'recv_rate', color: S2 }] : []));
   chart($('chLat'), rows, [{ label: 'latency', key: 'latency_ms', color: S1 }]);
   chart($('chMem'), rows, [{ label: 'used', key: 'mem', color: S1, scale: 2 ** -30 }, { label: 'available', key: 'mem_total', color: REF, dash: true, scale: 2 ** -30 }]);
 }

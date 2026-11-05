@@ -33,6 +33,7 @@ LABEL = "swarmqtt"
 # Splitting across workers spreads CPU and RAM. It adds no source ports: connections leave through
 # the Docker host's address, about 64k ports per broker host:port on Linux.
 PER_WORKER = 25000
+PEER_GRACE = 30
 
 
 def _env_int(name, default):
@@ -306,12 +307,12 @@ def bench_args(cfg, count, start, rate, role=None):
 def plan(total, rate, offset=0):
     """Split total connections (and total conn rate) across workers: [(count, start, rate), ...]."""
     n = math.ceil(total / PER_WORKER)
-    per_rate = max(1, rate // max(n, 1))
     out = []
     for i in range(n):
         count = min(PER_WORKER, total - i * PER_WORKER)
+        w_rate = max(1, round(rate * count / total))
         # emqtt-bench crashes when its per-thread connect interval rounds to 0 ms; it runs min(clients, CPUs) threads
-        out.append((count, offset + i * PER_WORKER, min(per_rate, 1000 * max(1, min(count, ncpu or 1)))))
+        out.append((count, offset + i * PER_WORKER, min(w_rate, 1000 * max(1, min(count, ncpu or 1)))))
     return out
 
 
@@ -482,12 +483,15 @@ def local_status():
 def merged_status():
     """This machine plus every peer, summed. A peer that doesn't answer is reported, not fatal."""
     s = local_status()
+    running_machines = 1 if any(w.get("status") == "running" for w in s["workers"]) else 0
     for peer in PEERS:
         try:
             p = peer_call(peer, "/api/status")
         except Exception as e:
             s["logs"].append(f"[{peer}] unreachable: {e}")
             continue
+        if p.get("running"):
+            running_machines += 1
         s["workers"] += [{**w, "name": f"{peer} {w['name']}"} for w in p["workers"]]
         for k, v in p["totals"].items():
             t = s["totals"].setdefault(k, {"total": 0, "rate": 0.0})
@@ -496,10 +500,21 @@ def merged_status():
         for k in ("mem", "mem_total", "cpu", "ncpu"):
             s["load"][k] += p["load"][k]
         s["logs"] += [f"[{peer}] {line}" for line in p["logs"][-10:]]
+    s["load"]["machines_running"] = running_machines
     return s
 
 
 # --- runs: one start = one run, recorded to DATA_DIR/runs/<id>.json ---
+
+def judge_row(rows):
+    if not rows:
+        return {}
+    with_m = [r for r in rows if "machines" in r and r["machines"] is not None]
+    if not with_m:
+        return rows[-1]
+    highest = max(r["machines"] for r in with_m)
+    return [r for r in with_m if r["machines"] == highest][-1]
+
 
 def judge(n, connected, failed, fail_pct, load_full):
     """Did a step of n devices hold? -> (ok, reason)."""
@@ -540,7 +555,7 @@ class Run:
         rates = [max(1, r) for r, _ in split(cfg["rate"], 1 + len(PEERS))]
         for i, (peer, (share, first)) in enumerate(zip(PEERS, rest), 1):
             # peers stop themselves at the deadline even if this controller dies
-            left = max(1, round(deadline - time.time())) if deadline else 0
+            left = max(1, round(deadline + PEER_GRACE - time.time())) if deadline else 0
             peer_call(peer, "/api/start", {**cfg, "total": share, "offset": cfg["offset"] + first,
                                            "subscribers": 0, "steps": [], "duration": left, "rate": rates[i]})
         launch({**cfg, "rate": rates[0]}, local, cfg["offset"] + offset, cfg["subscribers"], labels)
@@ -554,7 +569,8 @@ class Run:
                "conn_rate": get("connect_succ", "rate"), "pub_rate": get("pub", "rate"),
                # every subscriber gets every message: per subscriber = what the broker delivered
                "recv_rate": round(get("recv", "rate") / max(self.cfg["subscribers"], 1), 2), "latency_ms": s["latency_ms"], "mem": L["mem"],
-               "mem_total": L["mem_total"], "cpu": L["cpu"], "ncpu": L["ncpu"]}
+               "mem_total": L["mem_total"], "cpu": L["cpu"], "ncpu": L["ncpu"],
+               "machines": L.get("machines_running", 0)}
         self.record["samples"].append(row)
         if len(self.record["samples"]) % 5 == 0:  # every 10 s, so a restart loses little
             self.save()
@@ -585,7 +601,7 @@ class Run:
                     break
             elif self.ends_at and now >= self.ends_at:
                 break
-        last = rows[-1] if rows else (self.record["samples"][-1] if self.record["samples"] else {})
+        last = judge_row(rows or self.record["samples"])
         peak = lambda k: max((r[k] or 0 for r in every), default=0)  # whole step, settled or not
         mem_full = bool(last) and last["mem_total"] and peak("mem") > last["mem_total"] * MAX_MEM_SHARE
         if ok:
