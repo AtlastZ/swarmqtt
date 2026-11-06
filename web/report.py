@@ -75,6 +75,14 @@ def setup_rows(r):
     return rows
 
 
+def filter_samples(rows):
+    m_max = max((r["machines"] for r in rows if "machines" in r and r["machines"] is not None), default=None)
+    if m_max is None:
+        return list(rows)
+    return [r for r in rows if r.get("machines") is None or r.get("machines") >= m_max]
+
+
+
 def downsample(rows):
     step = max(1, len(rows) // MAX_POINTS)
     return rows[::step]
@@ -154,12 +162,12 @@ def build(r):
                                                     ("ALIGN", (0, 0), (6, -1), "RIGHT")]))
         story.append(t)
 
-    rows = downsample(r["samples"])
+    rows = downsample(filter_samples(r["samples"]))
     if len(rows) >= 2:
         story.append(Paragraph("Over time", h2))
         story.append(KeepTogether(chart("Devices connected", rows, [
             ("connected", "connected", BLUE, False, 1), ("target", "devices", MUTED, True, 1)], "devices")))
-        msg = [("published*", "pub_rate", BLUE, False, 1)]
+        msg = [("published", "pub_rate", BLUE, False, 1)]
         if c["subscribers"]:
             msg.append(("delivered", "recv_rate", ORANGE, False, 1))
         story.append(KeepTogether(chart("Messages per second", rows, msg, "msg/s")))
@@ -170,8 +178,6 @@ def build(r):
             ("used", "mem", BLUE, False, 2**-30), ("available", "mem_total", MUTED, True, 2**-30)], "GB")))
 
     story += [Paragraph("Caveats", h2)] + [Paragraph(f"&bull; {x}", small) for x in [
-        "* emqtt-bench counts each publish about twice: the published rate is roughly 2x what the broker "
-        "receives. Use the delivered rate (what each latency subscriber received) or broker metrics for throughput.",
         "Connected is cumulative successful connects reported by emqtt-bench; drops after connecting are not "
         "subtracted. Check the broker's own connection count.",
         "The broker certificate is not verified during the load test (an emqtt-bench limitation).",

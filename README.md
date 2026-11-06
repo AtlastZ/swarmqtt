@@ -78,7 +78,7 @@ PEER_TOKEN=รหัสยาวๆ PEERS=http://10.0.0.2:8082,http://10.0.0.3:8
 ถ้าใช้ `docker run` บน peer ให้เพิ่ม `-p 0.0.0.0:8082:8082 -e PEER_TOKEN=รหัสยาวๆ` ส่วน controller เพิ่ม `-e PEER_TOKEN=รหัสยาวๆ -e PEERS=http://10.0.0.2:8082`
 สร้าง token ได้ด้วย `openssl rand -hex 24` ทุกเครื่องต้องใช้ค่าเดียวกัน
 
-controller แบ่ง device และ Conn/sec เท่าๆ กัน (เลข client ไม่ซ้ำกัน, rate อย่างน้อย 1 ต่อเครื่อง) สั่ง start/stop ทุกเครื่อง และรวมยอด/RAM/CPU ให้ในหน้าเดียว
+controller แบ่ง device และ Conn/sec ตาม capacity ของแต่ละเครื่อง (RAM และ port cap บน Mac) หรือปรับสัดส่วนเองได้ในกล่อง Machines บน UI (เลข client ไม่ซ้ำกัน, rate อย่างน้อย 1 ต่อเครื่องที่ได้ device) สั่ง start/stop ทุกเครื่อง และรวมยอด/RAM/CPU ให้ในหน้าเดียว
 ramp ใช้ได้ตามปกติ peer จะหยุดเองตามเวลาแม้ controller ดับ ส่วน latency subscriber รันที่ controller เท่านั้น
 peer API (port 8082) รับแค่ start / stop / status และต้องมี `Authorization: Bearer <PEER_TOKEN>`
 แต่ค่า config (รวม password และ client key) ส่งเป็น HTTP ธรรมดา **ให้ใช้ใน network ที่ไว้ใจได้หรือผ่าน VPN เท่านั้น**
@@ -91,7 +91,7 @@ peer API (port 8082) รับแค่ start / stop / status และต้อ
 ใหม่จากตัว Mac เอง ซึ่งมี ephemeral port ค่าเริ่มต้น 49152–65535 (16,384 port, ดูด้วย `sysctl net.inet.ip.portrange.first net.inet.ip.portrange.last`)
 ค่าเริ่มต้น 15,000 จึงพอดีกับ stock range นี้ หากต้องการเพิ่ม ให้ขยาย port range บน Mac ด้วย `sudo sysctl -w net.inet.ip.portrange.first=10000`
 (ได้ 55,536 port, รีเซ็ตเมื่อ reboot) แล้วใส่ `MAC_MAX_DEVICES=50000` ใน `.env` จากนั้น `docker compose up -d` เมื่อขยายแล้ว RAM จะกลายเป็นขีดจำกัดแทน
-ถ้ามี peer ตัว cap นี้จะนับต่อเครื่องเพราะ controller แบ่ง device ให้เท่าๆ กัน หรือจะรัน swarmqtt บนเครื่อง Linux ที่อยู่ network เดียวกับ broker ก็ได้
+ถ้ามี peer ตัว cap นี้จะนับต่อเครื่องเพราะ controller แบ่ง device ตาม capacity ของแต่ละเครื่อง หรือจะรัน swarmqtt บนเครื่อง Linux ที่อยู่ network เดียวกับ broker ก็ได้
 
 ## MCP (ให้ AI agent สั่ง load test เอง)
 

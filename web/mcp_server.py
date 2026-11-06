@@ -79,6 +79,7 @@ def start_load_test(
     password: str = "",
     client_cert_pem: str = "",
     client_key_pem: str = "",
+    machine_weights: list[int] | None = None,
 ) -> dict:
     """Start a load test with `devices` concurrent simulated IoT devices (replaces any running test).
 
@@ -92,6 +93,7 @@ def start_load_test(
     Decimals follow the most precise number written (40:60 integers, 20.0:30.0 one decimal); typos are refused.
     `connect_retries`: times a failed client retries connecting before it counts as connect_fail (0-10, default 0).
     `wait_before_publishing`: hold back publishing until each worker container has started all client connections (default False).
+    `machine_weights`: optional device distribution weights across machines (this machine then peers). None or empty = automatic by capacity.
     The broker certificate is NOT verified during the load test.
     The test stops by itself after `duration_sec` (0 = run until stop_load_test). It is refused if the
     estimated RAM does not fit the Docker host.
@@ -109,7 +111,7 @@ def start_load_test(
         interval=publish_interval_ms, size=payload_bytes, payload=payload, duration=duration_sec,
         steps=ramp_steps or [], hold=hold_sec, fail_pct=fail_pct, subscribers=subscribers, sub_topic=sub_topic, qos=qos, keepalive=keepalive, retries=connect_retries, wait_publish=wait_before_publishing, tls=tls,
         tls_version=tls_version, version=mqtt_version, prefix=client_id_prefix, username=username,
-        password=password, cert=client_cert_pem, key=client_key_pem)
+        password=password, cert=client_cert_pem, key=client_key_pem, weights=machine_weights)
     try:
         app.start(cfg)
     except app.BadRequest as e:
